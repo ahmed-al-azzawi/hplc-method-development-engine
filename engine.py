@@ -9,6 +9,29 @@ import chardet
 import numpy as np
 import io
 
+def safe_read(uploaded_file):
+    # A way to read the file without risk of encoding errors.
+    # 1. Detect encoding
+    raw_bytes = uploaded_file.getvalue()
+    detected = chardet.detect(raw_bytes)
+    encoding = detected['encoding'] if detected['encoding'] else 'ascii'
+    
+    # 2. Decode text safely
+    text = raw_bytes.decode(encoding, errors='ignore')
+    
+    # 3. Pre-pad every line with 16 trailing commas so every row has AT LEAST 16 columns
+    padded_lines = [line + ',' * 16 for line in text.splitlines()]
+    padded_text = '\n'.join(padded_lines)
+    
+    # 4. Read padded string into Pandas, slicing strictly columns 0 through 15 (A through P)
+    df = pd.read_csv(
+        io.StringIO(padded_text),
+        header=None,
+        usecols=list(range(16)),  # Grabs only indices 0..15
+        engine='python'
+    )
+    
+    return df
 
 def peak_count(df):
     """
