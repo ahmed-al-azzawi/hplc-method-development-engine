@@ -51,6 +51,72 @@ def peak_count(df):
     raw_val = df.iloc[row_of_match, 1]
     return int(raw_val)
 
+def find_backpressure(df):
+    first_col = df.iloc[:, 0].astype(str)
+    
+    # 1. Define individual boolean masks
+    has_pump = first_col.str.contains('pump', case=False, na=False)
+    has_pressure = first_col.str.contains('pressure', case=False, na=False)
+    has_no_degas = ~first_col.str.contains('degas', case=False, na=False)
+    
+    # 2. Combine all conditions
+    matches = has_pump & has_pressure & has_no_degas
+    
+    # 3. Guard check
+    if not matches.any():
+        raise ValueError("No cell in the first column matched criteria ('pump', 'pressure', no 'degas').")
+        
+    row_of_match = matches.values.argmax()
+    required_column = 1  # Second Column
+    
+    # 4. Safely parse multiplier to float
+    multiplier_row = row_of_match + 6
+    try:
+        multiplier = float(df.iloc[multiplier_row, required_column])
+    except (ValueError, TypeError):
+        multiplier = 1.0  # Fallback if cell is empty or non-numeric
+    
+    start_row = row_of_match + 8
+    pressures = []
+    
+    for idx in range(100):
+        target_row = start_row + idx
+        
+        # Stop if we reach the end of the DataFrame
+        if target_row >= len(df):
+            break
+            
+        val = df.iloc[target_row, required_column]
+        
+        # Convert value to float dynamically instead of strict type checking
+        try:
+            numeric_val = float(val)
+            pressures.append(numeric_val)
+        except (ValueError, TypeError):
+            # Non-numeric cell encountered (e.g., end of table section)
+            break
+            
+    if not pressures:
+        raise ValueError("No numeric pressure values were found in the specified table range.")
+
+    # 5. Split and compute stability metrics
+    midpoint = len(pressures) // 2
+    first_half = np.mean(pressures[:midpoint])
+    second_half = np.mean(pressures[midpoint:])
+    
+    equilibrated = True
+    if abs(first_half - second_half) >= (0.05 * second_half):
+        equilibrated = False
+        
+    avg_pressure = float(np.mean([first_half, second_half])) * multiplier
+    
+    output = {
+        'backpressure': avg_pressure,
+        'equilibrated': equilibrated
+    }
+    
+    return output
+
 def main():
     st.set_page_config(layout='wide')
     # Title & instructions
