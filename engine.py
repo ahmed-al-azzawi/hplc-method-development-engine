@@ -117,6 +117,43 @@ def find_backpressure(df):
     
     return output
 
+def find_resolution(df, peaks):
+    colnum = 15  # Column P
+    res_col = df.iloc[:, colnum]
+    target_string = 'Resolution'
+    
+    matches = res_col.astype(str).str.contains(target_string, case=False, na=False)
+    
+    if not matches.any():
+        raise ValueError(f"'{target_string}' header was not found in column {colnum} of the CSV.")
+    
+    # Starts 1 row below the 'Resolution' header
+    start_row = matches.values.argmax() + 1
+    resolutions = []
+    
+    for peak in range(peaks):
+        val = df.iloc[start_row + peak, colnum]
+        
+        # Safely parse numeric values (handles strings like '-', 'N/A', or NaNs)
+        try:
+            parsed_val = float(val)
+        except (ValueError, TypeError):
+            parsed_val = 0.0
+            
+        resolutions.append(parsed_val)
+    
+    # Correct list comprehension syntax: [x for x in resolutions if ...]
+    non_zero_resolutions = [x for x in resolutions if x > 0.0]
+    
+    output = {
+        "resolutions": resolutions,
+        "min_res": float(min(resolutions)) if resolutions else 0.0,
+        # Uses default parameter to prevent crash if no non-zero resolution exists
+        "min_res_no_zero": float(min(non_zero_resolutions, default=0.0))
+    }
+    
+    return output
+
 def main():
     st.set_page_config(layout='wide')
     # Title & instructions
