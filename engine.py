@@ -321,6 +321,79 @@ def main():
             particle_typef = st.text_input('Bead Type', value='FPP')
             coreshellf = st.checkbox('Coreshell?', value=False)
             poresizef = st.number_input('Pore Size (Å)', min_value=0.0, value=140.0)
+    default_keys = [
+        'all_csvs',
+        'all_peak_counts',
+        'all_run_times',
+        'all_retention_times',
+        'all_resolutions_overall',
+        'all_resolutions_final',
+        'all_equilibrated',
+        'all_backpressures',
+        'all_pct_bs',
+        'all_solvents',
+        'all_ligands',
+        'all_bead_types',
+        'all_pore_sizes',
+        'all_coreshells',
+        'all_carbon_loads',
+        'all_column_lengths',
+        'all_internal_diameters',
+        'all_particle_sizes',
+        'all_flow_rates',
+        'all_temperatures',
+        'all_sample_concentrations'
+    ]
+
+    for key in default_keys:
+        if key not in st.session_state:
+            st.session_state[key] = []
+
+    # Tracker set to prevent re-parsing on every Streamlit page re-render
+    if 'processed_file_ids' not in st.session_state:
+        st.session_state.processed_file_ids = set()
+
+
+    # 2. Uploading & Single-Execution Processing
+    added_file = st.file_uploader('Upload a CSV file of your run.', type='csv')
+
+    if added_file is not None:
+        # Unique file fingerprint combining filename and byte size
+        file_id = f"{added_file.name}_{added_file.size}"
+        
+        # Process ONLY if this specific upload hasn't been parsed yet
+        if file_id not in st.session_state.processed_file_ids:
+            try:
+                dataframe_added = safe_read(added_file)
+                
+                # Peak Count
+                peak_cnt = peak_count(dataframe_added)
+                
+                # Run Time & Retention Times
+                retention_analysis = retention_time(dataframe_added, peak_cnt)
+                
+                # Resolution
+                resolution_analysis = find_resolution(dataframe_added, peak_cnt)
+                
+                # Backpressure
+                bp_analysis = find_backpressure(dataframe_added)
+                
+                # Append parsed values to session state
+                st.session_state.all_csvs.append(dataframe_added)
+                st.session_state.all_peak_counts.append(peak_cnt)
+                st.session_state.all_retention_times.append(retention_analysis['retention_times'])
+                st.session_state.all_run_times.append(retention_analysis['runtime'])
+                st.session_state.all_resolutions_overall.append(resolution_analysis['resolutions'])
+                st.session_state.all_resolutions_final.append(resolution_analysis['min_res'])
+                st.session_state.all_equilibrated.append(bp_analysis['equilibrated'])
+                st.session_state.all_backpressures.append(bp_analysis['backpressure'])
+                
+                # Mark file as processed
+                st.session_state.processed_file_ids.add(file_id)
+                st.success(f"Successfully processed {added_file.name}!")
+                
+            except Exception as e:
+                st.error(f"Error parsing {added_file.name}: {e}")
   
   if __name__ == "__main__":
     if not st.runtime.exists():
