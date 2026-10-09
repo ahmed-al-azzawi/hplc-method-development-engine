@@ -9,6 +9,25 @@ import chardet
 import numpy as np
 import io
 
+
+def peak_count(df):
+    """
+    Locates '# of Peaks' in the first column and returns the count from Column B.
+    """
+    first_col = df.iloc[:, 0]
+    target_string = '# of Peaks'
+    
+    matches = first_col.astype(str).str.contains(target_string, case=False, na=False)
+    
+    if not matches.any():
+        raise ValueError(f"'{target_string}' header was not found in the first column of the CSV.")
+    
+    row_of_match = matches.values.argmax()
+    
+    # Cast to int to ensure numeric safety when passed into range()
+    raw_val = df.iloc[row_of_match, 1]
+    return int(raw_val)
+
 def main():
     st.set_page_config(layout='wide')
     # Title & instructions
