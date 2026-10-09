@@ -33,6 +33,50 @@ def safe_read(uploaded_file):
     
     return df
 
+def retention_time(df, peaks):
+    """
+    Locates the 'Peak Table' anchor in the first column of the DataFrame and extracts
+    the retention times for a specified number of peaks starting 3 rows below the anchor.
+    
+    Parameters:
+        df (pd.DataFrame): The chromatogram DataFrame.
+        peaks (int): The total number of peaks to extract.
+        
+    Returns:
+        dict: A dictionary containing the list of retention times and total runtime.
+    """
+    # 1. Access the first column
+    first_col = df.iloc[:, 0]
+    target_string = 'Peak Table'
+    
+    # 2. Perform case-insensitive search for the target header
+    matches = first_col.astype(str).str.contains(target_string, case=False, na=False)
+    
+    # 3. Guard clause: Ensure target string was actually found in the column
+    if not matches.any():
+        raise ValueError(f"'{target_string}' header was not found in the first column of the CSV.")
+    
+    # 4. Get the exact integer row index position using .values.argmax()
+    row_of_match = matches.values.argmax()
+    
+    # 5. Define target row (3 rows below anchor) and target column (2nd column / index 1)
+    start_row = row_of_match + 3
+    required_column = 1
+    
+    # 6. Extract retention times for each requested peak
+    retention_times = []
+    for peak in range(peaks):
+        val = df.iloc[start_row + peak, required_column]
+        retention_times.append(float(val))
+    
+    # 7. Construct output dictionary (runtime is set to the last peak's retention time)
+    output = {
+        "retention_times": retention_times,
+        "runtime": retention_times[-1] if retention_times else None
+    }
+    
+    return output
+
 def peak_count(df):
     """
     Locates '# of Peaks' in the first column and returns the count from Column B.
