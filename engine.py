@@ -249,6 +249,65 @@ def min_b(tr):
     return float(min_pct_b)
 
 
+def int_pct_b():
+    # Safe default search bounds without needing passed arguments
+    b_min = float(st.session_state.all_pct_bs[-1])
+    b_max = 80.0
+    step = 0.5
+
+    ret_times = list(st.session_state.all_retention_times)
+    pct_bs = list(st.session_state.all_pct_bs)
+    
+    if not ret_times or len(ret_times) < 2:
+        raise ValueError("At least two runs are required to perform linear regression.")
+    
+    max_peaks = max(len(sublist) - 1 for sublist in ret_times)
+    curves = []
+    
+    # 1. Fit linear regression models
+    for peak_idx in range(1, max_peaks + 1):
+        xvals, yvals = [], []
+        for run_idx, run_ret_times in enumerate(ret_times):
+            if peak_idx < len(run_ret_times):
+                t0, tR = run_ret_times[0], run_ret_times[peak_idx]
+                if tR > t0 and t0 > 0:
+                    k = (tR - t0) / t0
+                    xvals.append(pct_bs[run_idx])
+                    yvals.append(np.log10(k))
+        
+        if len(xvals) >= 2:
+            res = linregress(xvals, yvals)
+            curves.append((res.slope, res.intercept))
+            
+    if len(curves) < 2:
+        return float(ceil(pct_bs[-1]))
+        
+    # Cap upper search bound to max %B run so far (or b_max default)
+    actual_b_max = min(b_max, max(pct_bs))
+    speculative_bs = np.arange(b_min, actual_b_max + step, step)
+    
+    slopes = np.array([c[0] for c in curves])[:, np.newaxis]      # Shape: (N_peaks, 1)
+    intercepts = np.array([c[1] for c in curves])[:, np.newaxis]  # Shape: (N_peaks, 1)
+    
+    # 2. Vectorized log(k) and real k conversion: k = 10^(m * %B + c)
+    log_k_grid = slopes * speculative_bs + intercepts
+    k_grid = 10 ** log_k_grid  # Convert back to real k values!
+    
+    # 3. Vectorized pairwise difference across all peaks for every %B step
+    pairwise_diffs = np.abs(k_grid[:, np.newaxis, :] - k_grid[np.newaxis, :, :])
+    
+    # Mask out diagonal (self-comparisons)
+    n_peaks = len(curves)
+    diag_mask = ~np.eye(n_peaks, dtype=bool)
+    
+    # Minimum separation across peaks for each speculative %B
+    min_separations = pairwise_diffs[diag_mask, :].reshape(n_peaks - 1, n_peaks, -1).min(axis=(0, 1))
+    
+    # 4. Find %B that maximizes the worst-case real k separation
+    best_idx = np.argmax(min_separations)
+    ideal_pct_b = speculative_bs[best_idx]
+    return float(round(ideal_pct_b, 1))
+
 def main():
     st.set_page_config(layout='wide')
     # Title & instructions
