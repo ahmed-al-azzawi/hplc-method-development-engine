@@ -394,7 +394,33 @@ def main():
                 
             except Exception as e:
                 st.error(f"Error parsing {added_file.name}: {e}")
-  
+
+with st.expander("🔍 View Raw Parsed Values (Session State)", expanded=False):
+        if len(st.session_state.all_csvs) == 0:
+            st.info("No files have been parsed yet. Upload a CSV to view extracted data.")
+        else:
+            # Display the stored lists directly as raw session state values
+            st.write("**Peak Counts:**", st.session_state.all_peak_counts)
+            st.write("**Run Times:**", st.session_state.all_run_times)
+            st.write("**Retention Times (per run):**", st.session_state.all_retention_times)
+            st.write("**Resolutions Overall:**", st.session_state.all_resolutions_overall)
+            st.write("**Resolutions Final (Min Res):**", st.session_state.all_resolutions_final)
+            st.write("**Equilibrated:**", st.session_state.all_equilibrated)
+            st.write("**Backpressures:**", st.session_state.all_backpressures)
+            
+            # Optional raw dictionary dump
+            st.divider()
+            st.caption("Raw Session State Object:")
+            st.json({
+                "peak_counts": st.session_state.all_peak_counts,
+                "run_times": st.session_state.all_run_times,
+                "retention_times": st.session_state.all_retention_times,
+                "resolutions_overall": st.session_state.all_resolutions_overall,
+                "resolutions_final": st.session_state.all_resolutions_final,
+                "equilibrated": st.session_state.all_equilibrated,
+                "backpressures": st.session_state.all_backpressures
+            })
+
   if __name__ == "__main__":
     if not st.runtime.exists():
         sys.argv = ["streamlit", "run", __file__]
