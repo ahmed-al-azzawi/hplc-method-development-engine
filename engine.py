@@ -202,8 +202,10 @@ def min_b(tr):
     # Make copies so popping elements doesn't delete session state data
     runtimes = list(st.session_state.all_run_times)
     pct_bs = list(st.session_state.all_pct_bs)
-    
-    tzero = runtimes[0]
+    ret_values = st.session_state.all_retention_times
+    all_tzeros = [tx[0] for tx in ret_values]
+    tzero = np.mean(all_tzeros)
+    #tzero = runtimes[0]
     
     # Calculate k and log10(k)
     k_values = [(runtime - tzero) / tzero for runtime in runtimes]
@@ -213,20 +215,23 @@ def min_b(tr):
     
     slope1 = 0.0
     intercept1 = 0.0
-    
     # Iterate over the length of the list, not the list itself
-    valid_pct_bs = pct_bs[:len(log_ks)]
+    valid_pct_bs = pct_bs
     for _ in range(len(valid_pct_bs)):
         if len(valid_pct_bs) < 2:
             break
-            
-        curve = linregress(valid_pct_bs, log_ks)
+        tzero = np.mean(all_tzeros)
+        try:
+            curve = linregress(valid_pct_bs, log_ks)
+        except:
+            raise ValueError(f'Valid: {str(valid_pct_bs)}. Log_ks: {str(log_ks)}. Runtimes: {str(runtimes)}. All pct_bs: {str(pct_bs)}. tzero: {tzero}')
         r_squared = round(curve.rvalue ** 2, 3)
         
         # Trim non-linear points if R² < 0.995 and enough data points remain
         if r_squared < 0.995 and len(pct_bs) > 4:
             log_ks.pop(0)
             valid_pct_bs.pop(0)
+            all_tzeros.pop(0)
         else:
             slope1 = curve.slope
             intercept1 = curve.intercept
@@ -246,7 +251,10 @@ def min_b(tr):
     min_pct_b = (required_logk - intercept1) / slope1
     
     print(f'Slope: {slope1}. Int: {intercept1}. RSQ: {r_squared}')
-    return float(min_pct_b)
+    st.session_state.tr_slope = slope1
+    st.session_state.tr_intercept = intercept1
+    st.session_state.tr_tzero = tzero
+    return float(ceil(min_pct_b))
 
 
 def int_pct_b():
