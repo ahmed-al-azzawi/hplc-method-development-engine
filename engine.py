@@ -659,8 +659,7 @@ def main():
                 "equilibrated": st.session_state.all_equilibrated,
                 "backpressures": st.session_state.all_backpressures
             })
-
-        # Processing of decisions
+    # Processing of decisions
     if st.button('Click to acquire conditions of next run, according to this run.'):
         # Guard check: Ensure at least one run has been uploaded and parsed
         if not st.session_state.all_backpressures:
@@ -669,21 +668,25 @@ def main():
             latest_bp = st.session_state.all_backpressures[-1]
             latest_peaks = st.session_state.all_peak_counts[-1]
             latest_runtime = st.session_state.all_run_times[-1]
+            latest_resolution = st.session_state.all_resolutions_final[-1]
             run_count = len(st.session_state.all_backpressures)
             
             # 1. Backpressure Check
             if latest_bp > bpspec:
+                st.caption(f"📊 **Run Metrics:** Backpressure ({latest_bp:.1f} bar) > Spec ({bpspec:.1f} bar) | Peaks: {latest_peaks}/{peakspec}")
                 st.warning(f'Run number {run_count} exceeded backpressure limit!')
                 st.session_state.show_decision_radio = False
                 
             # 2. Peak Count Checks
             elif latest_peaks > peakspec:
+                st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) > Spec ({peakspec}) | $t_R$: {latest_runtime:.1f} min | $R_s$: {latest_resolution:.2f}")
                 st.warning(f'Run number {run_count} has more peaks than expected. Investigate for contamination.')
                 st.session_state.show_decision_radio = False
                 
             elif latest_peaks < peakspec:
                 # 3a. Fast Run / Fixed Step
                 if latest_runtime < (0.5 * runspec):
+                    st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) < Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) << Spec ({runspec} min) | $R_s$: {latest_resolution:.2f}")
                     current_pct_b = st.session_state.all_pct_bs[-1]
                     new_pct_b = current_pct_b - 10.0
                     
@@ -715,9 +718,70 @@ def main():
 
                 # 3b. Optimization Decision Trigger
                 elif latest_runtime < runspec:
+                    st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) < Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) < Spec ({runspec} min) | $R_s$: {latest_resolution:.2f}")
                     st.session_state.choice1 = min_b(runspec)
                     st.session_state.choice2 = int_pct_b()
                     st.session_state.show_decision_radio = True
+                
+                elif latest_runtime > runspec:
+                    st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) < Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) > Spec ({runspec} min) | $R_s$: {latest_resolution:.2f}")
+                    # Where runtime above spec, and less than spec peaks, return to previous %B and change selectivity.
+                    handle_selectivity(True)
+            
+            elif latest_peaks == peakspec:
+                # 1. Define criteria thresholds
+                pass_runtime = latest_runtime <= runspec
+                runtime_far_below = latest_runtime < (0.5 * runspec)  # tR << Spec
+                pass_resolution = latest_resolution >= res_spec
+
+                # ------------------------------------------------------------------
+                # CASE A: All specifications MET (Rs >= spec AND tR <= spec)
+                # ------------------------------------------------------------------
+                if pass_runtime and pass_resolution:
+                    if runtime_far_below:
+                        st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) << Spec ({runspec} min) | $R_s$ ({latest_resolution:.2f}) >= Spec ({res_spec})")
+                        st.info(
+                            f"**Next Run Strategy:** Method MET. %B and Selectivity parameters are frozen.\n\n"
+                            f"*Observation:* Run time ({latest_runtime:.1f} min) is far below target (≤{runspec} min).\n\n"
+                            f"*Optional Recommendation:* Move to Efficiency Cycle (Flow Chart 2) to increase flow rate and shorten run time further.\n\n"
+                            f"*Controlled by:* Pump | *Category:* Mechanical | *Cycle:* Efficiency (N)"
+                        )
+                    else:
+                        st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) <= Spec ({runspec} min) | $R_s$ ({latest_resolution:.2f}) >= Spec ({res_spec})")
+                        st.success(
+                            f"🎉 **Method Development Complete!** All specifications satisfied.\n\n"
+                            f"*Peak Count:* {latest_peaks}/{peakspec} | *Run Time:* {latest_runtime:.1f} min (Target: ≤{runspec} min) | *Resolution:* {latest_resolution:.2f} (Target: ≥{res_spec})\n\n"
+                            f"*Status:* Method MET. No further parameter adjustments required."
+                        )
+
+                # ------------------------------------------------------------------
+                # CASE B: Peak count met, but Run Time or Resolution failed -> Direct to FC2
+                # ------------------------------------------------------------------
+                else:
+                    if runtime_far_below and not pass_resolution:
+                        st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) << Spec ({runspec} min) | $R_s$ ({latest_resolution:.2f}) < Spec ({res_spec})")
+                        reason = (
+                            f"Peak count met ({latest_peaks}/{peakspec}), but Resolution is below specification ({latest_resolution:.2f} < {res_spec}). "
+                            f"Run time is very short ({latest_runtime:.1f} min < {0.5 * runspec:.1f} min)."
+                        )
+                    elif not pass_resolution and not pass_runtime:
+                        st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) > Spec ({runspec} min) | $R_s$ ({latest_resolution:.2f}) < Spec ({res_spec})")
+                        reason = (
+                            f"Resolution is below specification ({latest_resolution:.2f} < {res_spec}) "
+                            f"AND Run Time exceeds specification ({latest_runtime:.1f} min > {runspec} min)."
+                        )
+                    elif not pass_resolution:
+                        st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) <= Spec ({runspec} min) | $R_s$ ({latest_resolution:.2f}) < Spec ({res_spec})")
+                        reason = f"Resolution is below specification ({latest_resolution:.2f} < {res_spec})."
+                    else:
+                        st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) > Spec ({runspec} min) | $R_s$ ({latest_resolution:.2f}) >= Spec ({res_spec})")
+                        reason = f"Run Time exceeds specification ({latest_runtime:.1f} min > {runspec} min)."
+
+                    st.info(
+                        f"**Next Run Strategy:** Direct to Efficiency Cycle (Flow Chart 2). %B and Selectivity parameters are frozen to preserve peak separation.\n\n"
+                        f"*Reason:* {reason}\n\n"
+                        f"*Controlled by:* Pump (Flow Rate) / Column (Dimensions, Particle Size) | *Category:* Mechanical | *Cycle:* Efficiency (N)"
+                    )
         if st.session_state.get('show_decision_radio', False):
         choice1 = st.session_state.choice1
         choice2 = st.session_state.choice2
