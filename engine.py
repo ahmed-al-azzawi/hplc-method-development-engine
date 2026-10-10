@@ -504,8 +504,7 @@ def main():
                 
             except Exception as e:
                 st.error(f"Error parsing {added_file.name}: {e}")
-
-with st.expander("🔍 View Raw Parsed Values (Session State)", expanded=False):
+    with st.expander("🔍 View Raw Parsed Values (Session State)", expanded=False):
         if len(st.session_state.all_csvs) == 0:
             st.info("No files have been parsed yet. Upload a CSV to view extracted data.")
         else:
@@ -530,6 +529,115 @@ with st.expander("🔍 View Raw Parsed Values (Session State)", expanded=False):
                 "equilibrated": st.session_state.all_equilibrated,
                 "backpressures": st.session_state.all_backpressures
             })
+
+        # Processing of decisions
+    if st.button('Click to acquire conditions of next run, according to this run.'):
+        # Guard check: Ensure at least one run has been uploaded and parsed
+        if not st.session_state.all_backpressures:
+            st.error("No run data found. Please upload a CSV run file first.")
+        else:
+            latest_bp = st.session_state.all_backpressures[-1]
+            latest_peaks = st.session_state.all_peak_counts[-1]
+            latest_runtime = st.session_state.all_run_times[-1]
+            run_count = len(st.session_state.all_backpressures)
+            
+            # 1. Backpressure Check
+            if latest_bp > bpspec:
+                st.warning(f'Run number {run_count} exceeded backpressure limit!')
+                st.session_state.show_decision_radio = False
+                
+            # 2. Peak Count Checks
+            elif latest_peaks > peakspec:
+                st.warning(f'Run number {run_count} has more peaks than expected. Investigate for contamination.')
+                st.session_state.show_decision_radio = False
+                
+            elif latest_peaks < peakspec:
+                # 3a. Fast Run / Fixed Step
+                if latest_runtime < (0.5 * runspec):
+                    current_pct_b = st.session_state.all_pct_bs[-1]
+                    new_pct_b = current_pct_b - 10.0
+                    
+                    st.info(
+                        f"**Next Run Strategy:** Decrease %B by 10% (from {current_pct_b}% to {new_pct_b}%)\n\n"
+                        f"*Controlled by:* Pump | *Cycle:* Retention"
+                    )
+                    
+                    st.session_state.all_pct_bs.append(new_pct_b)
+                    
+                    static_keys = [
+                        'all_solvents', 
+                        'all_ligands', 
+                        'all_bead_types',
+                        'all_pore_sizes', 
+                        'all_coreshells', 
+                        'all_carbon_loads',
+                        'all_column_lengths',      # Added missing key
+                        'all_internal_diameters', 
+                        'all_particle_sizes',
+                        'all_flow_rates', 
+                        'all_temperatures'
+                    ]
+
+                    # Propagate static chromatographic parameters to the next run
+                    for key in static_keys:
+                        st.session_state[key].append(st.session_state[key][-1])
+                    st.session_state.show_decision_radio = False
+
+                # 3b. Optimization Decision Trigger
+                elif latest_runtime < runspec:
+                    st.session_state.choice1 = min_b(runspec)
+                    st.session_state.choice2 = int_pct_b()
+                    st.session_state.show_decision_radio = True
+        if st.session_state.get('show_decision_radio', False):
+        choice1 = st.session_state.choice1
+        choice2 = st.session_state.choice2
+        # %B = (log10(k) - intercept) / slope
+        # log(K) = (%B * slope) + intercept
+        expected_intb_logk = choice2 * st.session_state.tr_slope + st.session_state.tr_intercept
+        # K = (tR - t0)/t0
+        # tR = K*t0 + t0
+        expected_intb_tr = (10 ** expected_intb_logk) * st.session_state.tr_tzero + st.session_state.tr_tzero 
+        choice_made = st.radio(
+            f'Select whether to proceed with Intermediate %B ({choice2}%), or Minimum %B ({choice1}%):\n\n'
+            f'Expected runtime at Intermediate %B is {expected_intb_tr} min. Expected runtime at Minimum %B: {runspec} min',
+            ['Not Selected', 'Min%B', 'Intermediate %B']
+        )
+        print(choice1)
+        print(choice2)
+        if st.button('Confirm %B Selection'):
+            selected_b = None
+            if choice_made == 'Min%B':
+                selected_b = choice1
+            elif choice_made == 'Intermediate %B':
+                selected_b = choice2
+                
+            if selected_b is not None:
+                st.session_state.all_pct_bs.append(selected_b)
+                
+                static_keys = [
+                        'all_solvents', 
+                        'all_ligands', 
+                        'all_bead_types',
+                        'all_pore_sizes', 
+                        'all_coreshells', 
+                        'all_carbon_loads',
+                        'all_column_lengths',      # Added missing key
+                        'all_internal_diameters', 
+                        'all_particle_sizes',
+                        'all_flow_rates', 
+                        'all_temperatures'
+                ]
+
+                # Propagate static chromatographic parameters to the next run
+                for key in static_keys:
+                    st.session_state[key].append(st.session_state[key][-1])
+                    st.info(
+                    f"**Next Run Strategy:** Change %B to {selected_b}%)\n\n"
+                    f"*Controlled by:* Pump | *Parameter Type*: Chemical | *Cycle:* Retention"
+                    )
+                st.success(f"Added %B condition: {selected_b}% for next run!")
+                st.session_state.show_decision_radio = False
+                st.rerun()
 
   if __name__ == "__main__":
     if not st.runtime.exists():
