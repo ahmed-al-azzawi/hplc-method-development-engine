@@ -316,6 +316,128 @@ def int_pct_b():
     ideal_pct_b = speculative_bs[best_idx]
     return float(round(ideal_pct_b, 1))
 
+
+def handle_selectivity(prev_b=False):
+    # 1. Initialize counter
+    if 'selectivity_progression' not in st.session_state:
+        st.session_state.selectivity_progression = 0
+    
+    st.session_state.selectivity_progression += 1
+    
+    modified_parameters = []
+    static_keys = [
+        'all_solvents', 
+        'all_ligands', 
+        'all_bead_types',
+        'all_pore_sizes',
+        'all_coreshells', 
+        'all_carbon_loads',
+        'all_column_lengths',
+        'all_internal_diameters', 
+        'all_particle_sizes',
+        'all_flow_rates', 
+        'all_temperatures', 
+        'all_pct_bs'
+    ]
+    
+    # Under some circumstances switch to previous %B and continue changing selectivity
+    if prev_b:
+        modified_parameters.append('all_pct_bs')
+        st.session_state.all_pct_bs.append(st.session_state.all_pct_bs[-2])
+        
+    match st.session_state.selectivity_progression:
+        case 1:
+            st.session_state.all_temperatures.append('40')
+            modified_parameters.append('all_temperatures')
+            st.info(
+                "**Next Run Strategy:** Increase Temperature to 40 °C to modify band spacing (selectivity) and reduce mobile phase viscosity. Shortens runtime and may reduce peak width. \n\n"
+                "*Controlled by:* Column Oven | *Category:* Both (Chemical & Mechanical) | *Cycle:* Selectivity"
+            )
+            
+        case 2:
+            st.session_state.all_temperatures.append('60')
+            modified_parameters.append('all_temperatures')
+            st.info(
+                "**Next Run Strategy:** Increase Temperature to 60 °C to further adjust selectivity and sharpen peak shapes. Further shortens runtime and may reduce peak width. \n\n"
+                "*Controlled by:* Column Oven | *Category:* Both (Chemical & Mechanical) | *Cycle:* Selectivity"
+            )
+            
+        case 3:
+            st.session_state.all_temperatures.append('amb')
+            current_solvent = st.session_state.all_solvents[-1].strip().lower()
+            current_pct_b = st.session_state.all_pct_bs[-1]
+            
+            if current_solvent in ['acn', 'acetonitrile']:
+                new_solvent = 'MeOH'
+                nomogram_slope = 1.0090909
+                nomogram_int = 6.9264069
+                converted_b = current_pct_b * nomogram_slope + nomogram_int
+            elif current_solvent in ['meoh', 'methanol']:
+                new_solvent = 'ACN'
+                nomogram_slope = 0.980221359
+                nomogram_int = -6.246035141
+                converted_b = current_pct_b * nomogram_slope + nomogram_int
+            else:
+                new_solvent = st.session_state.all_solvents[-1]
+                converted_b = current_pct_b
+
+            st.session_state.all_solvents.append(new_solvent)
+            st.session_state.all_pct_bs.append(round(converted_b, 1))
+            modified_parameters.extend(['all_temperatures', 'all_pct_bs', 'all_solvents'])
+            
+            st.info(
+                f"**Next Run Strategy:** Swap Organic Solvent to {new_solvent} at nomogram-converted ratio ({round(converted_b, 1)}% B) at ambient temperature to alter solute-solvent solvophobic interactions like acidity, basicity and dipolarity at the same strength.\n\n"
+                f"*Controlled by:* Pump / Solvent Manager | *Category:* Chemical | *Cycle:* Selectivity"
+            )
+            
+        case 4:
+            st.session_state.all_temperatures.append('40')
+            modified_parameters.append('all_temperatures')
+            st.info(
+                "**Next Run Strategy:** Increase Temperature to 40 °C to modify band spacing (selectivity) and reduce mobile phase viscosity. Shortens runtime and may reduce peak width. \n\n"
+                "*Controlled by:* Column Oven | *Category:* Both (Chemical & Mechanical) | *Cycle:* Selectivity"
+            )
+            
+        case 5:
+            st.session_state.all_temperatures.append('60')
+            modified_parameters.append('all_temperatures')
+            st.info(
+                "**Next Run Strategy:** Increase Temperature to 60 °C to further adjust selectivity and sharpen peak shapes. Further shortens runtime and may reduce peak width. \n\n"
+                "*Controlled by:* Column Oven | *Category:* Both (Chemical & Mechanical) | *Cycle:* Selectivity"
+            )
+            
+        case 6:
+            default_keys = [
+                'all_csvs', 'all_peak_counts', 'all_run_times', 'all_retention_times',
+                'all_resolutions_overall', 'all_resolutions_final', 'all_equilibrated',
+                'all_backpressures', 'all_pct_bs', 'all_solvents', 'all_ligands',
+                'all_bead_types', 'all_pore_sizes', 'all_coreshells', 'all_carbon_loads',
+                'all_column_lengths', 'all_internal_diameters', 'all_particle_sizes',
+                'all_flow_rates', 'all_temperatures', 'all_sample_concentrations'
+            ]
+            
+            last_ligand = st.session_state.all_ligands[-1] if st.session_state.get('all_ligands') else "current"
+            
+            for key in default_keys:
+                if key in st.session_state:
+                    del st.session_state[key]
+                    
+            st.session_state.selectivity_progression = 0
+            st.session_state.reset_message = (
+                f"Ligand change required. Runs wiped because current history is non-transferable. "
+                f"Please select a new stationary phase other than '{last_ligand}' using the top menu."
+            )
+            st.session_state.pending_ligand_change = True
+            st.rerun()
+            return
+
+    # 2. Propagate unmodified parameters forward
+    keep_the_same = [key for key in static_keys if key not in modified_parameters]
+    for key in keep_the_same:
+        if key in st.session_state and st.session_state[key]:
+            st.session_state[key].append(st.session_state[key][-1])
+
+
 def main():
     st.set_page_config(layout='wide')
     # Title & instructions
