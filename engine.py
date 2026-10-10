@@ -832,6 +832,112 @@ def main():
                 st.success(f"Added %B condition: {selected_b}% for next run!")
                 st.session_state.show_decision_radio = False
                 st.rerun()
+     if st.session_state.get('all_backpressures') and len(st.session_state.all_backpressures) > 0:
+        st.subheader("📜 Historical Run Record & Decisions")
+
+        # Build history records list safely
+        history_records = []
+        total_runs = len(st.session_state.all_backpressures)
+
+        for i in range(total_runs):
+            run_no = i + 1
+            
+            # Safely pull conditions per run index
+            pct_b = st.session_state.all_pct_bs[i] if i < len(st.session_state.all_pct_bs) else "-"
+            solvent = st.session_state.all_solvents[i] if i < len(st.session_state.all_solvents) else "-"
+            temp = st.session_state.all_temperatures[i] if i < len(st.session_state.all_temperatures) else "-"
+            ligand = st.session_state.all_ligands[i] if i < len(st.session_state.all_ligands) else "-"
+            flow = st.session_state.all_flow_rates[i] if i < len(st.session_state.all_flow_rates) else "-"
+
+            # Measured responses
+            bp = st.session_state.all_backpressures[i] if i < len(st.session_state.all_backpressures) else 0.0
+            peaks = st.session_state.all_peak_counts[i] if i < len(st.session_state.all_peak_counts) else 0
+            runtime = st.session_state.all_run_times[i] if i < len(st.session_state.all_run_times) else 0.0
+            res = st.session_state.all_resolutions_final[i] if i < len(st.session_state.all_resolutions_final) else 0.0
+
+            # Deriving the historical decision associated with the run state
+            if bp > bpspec:
+                decision = "⚠️ Overpressure Limit Exceeded"
+            elif peaks > peakspec:
+                decision = "⚠️ Extra Peaks (> Target) — Check Contamination"
+            elif peaks < peakspec:
+                if runtime < (0.5 * runspec):
+                    decision = f"Retention Cycle: Decreased %B to {pct_b}% (-10%)"
+                elif runtime < runspec:
+                    decision = "Retention Optimization: Evaluated Nomogram/Intermediate %B"
+                else:
+                    decision = "Retention Timeout: Returned to Prev %B & Triggered Selectivity"
+            elif peaks == peakspec:
+                if runtime <= runspec and res >= res_spec:
+                    decision = "🎉 Method Complete (All Specifications Met)"
+                else:
+                    decision = "Selectivity Frozen → Handed Off to Efficiency (Flow Chart 2)"
+            else:
+                decision = "Evaluated"
+
+            history_records.append({
+                "Run #": f"Run {run_no}",
+                "%B Ratio": f"{pct_b}%",
+                "Solvent": solvent,
+                "Temp (°C)": temp,
+                "Ligand": ligand,
+                "Flow Rate": f"{flow} mL/min",
+                "Backpressure": f"{bp:.1f} bar",
+                "Peaks": f"{peaks} / {peakspec}",
+                "Run Time": f"{runtime:.2f} min",
+                "Resolution": f"{res:.2f}",
+                "Associated Decision / Action": decision
+            })
+
+        # Render non-interactive summary dataframe
+        df_history = pd.DataFrame(history_records)
+
+        st.dataframe(
+            df_history,
+            use_container_width=True,
+            hide_index=True
+        )
+    else:
+        st.caption("No historical run records available yet. Upload a CSV chromatogram run to populate the record.")
+
+    st.header('Equipment Interactive: Use embedded sheet below. Collapsed by default.')
+    st.caption('URL to interactive, in case of embedding failure: https://docs.google.com/spreadsheets/d/1-Kl4UFp9Kk7IYOftbTtGVi-bior72YgTK0jYJZEbVK8/edit?usp=sharing')
+    google_sheet_url = "https://docs.google.com/spreadsheets/d/1-Kl4UFp9Kk7IYOftbTtGVi-bior72YgTK0jYJZEbVK8/edit?gid=268052302#gid=268052302"
+
+    with st.expander("📊 View Live Sheet Interactive", expanded=False):
+        st.markdown(
+            f"""
+            <div style="
+                position: relative;
+                width: 100%;
+                height: 600px;
+                overflow: hidden;
+                overscroll-behavior: contain;
+                border: none;
+                outline: none;
+                margin: 0;
+                padding: 0;
+            ">
+                <iframe 
+                    src="{google_sheet_url}" 
+                    loading="lazy"
+                    tabindex="-1"
+                    style="
+                        position: absolute;
+                        top: -120px;
+                        left: 0;
+                        width: 100%;
+                        height: calc(100% + 120px);
+                        border: none;
+                        outline: none;
+                    " 
+                    frameborder="0"
+                    scrolling="auto">
+                </iframe>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
 
   if __name__ == "__main__":
     if not st.runtime.exists():
