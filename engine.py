@@ -198,6 +198,57 @@ def find_resolution(df, peaks):
     
     return output
 
+def min_b(tr):
+    # Make copies so popping elements doesn't delete session state data
+    runtimes = list(st.session_state.all_run_times)
+    pct_bs = list(st.session_state.all_pct_bs)
+    
+    tzero = runtimes[0]
+    
+    # Calculate k and log10(k)
+    k_values = [(runtime - tzero) / tzero for runtime in runtimes]
+    
+    # Safeguard against k <= 0 before taking log10
+    log_ks = [np.log10(k) if k > 0 else -3.0 for k in k_values]
+    
+    slope1 = 0.0
+    intercept1 = 0.0
+    
+    # Iterate over the length of the list, not the list itself
+    valid_pct_bs = pct_bs[:len(log_ks)]
+    for _ in range(len(valid_pct_bs)):
+        if len(valid_pct_bs) < 2:
+            break
+            
+        curve = linregress(valid_pct_bs, log_ks)
+        r_squared = round(curve.rvalue ** 2, 3)
+        
+        # Trim non-linear points if R² < 0.995 and enough data points remain
+        if r_squared < 0.995 and len(pct_bs) > 4:
+            log_ks.pop(0)
+            valid_pct_bs.pop(0)
+        else:
+            slope1 = curve.slope
+            intercept1 = curve.intercept
+            break
+            
+    if slope1 == 0.0:
+        raise ValueError("Linear regression failed: slope is zero.")
+        
+    # Correct calculation: required_logk needs np.log10
+    k_target = (tr - tzero) / tzero
+    if k_target <= 0:
+        raise ValueError("Target retention time (tr) must be greater than t0.")
+        
+    required_logk = np.log10(k_target)
+    
+    # %B = (log10(k) - intercept) / slope
+    min_pct_b = (required_logk - intercept1) / slope1
+    
+    print(f'Slope: {slope1}. Int: {intercept1}. RSQ: {r_squared}')
+    return float(min_pct_b)
+
+
 def main():
     st.set_page_config(layout='wide')
     # Title & instructions
