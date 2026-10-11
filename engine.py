@@ -651,9 +651,8 @@ def main():
     if 'processed_file_ids' not in st.session_state:
         st.session_state.processed_file_ids = set()
 
-
     # 2. Uploading & Single-Execution Processing
-    added_file = st.file_uploader('Upload a CSV file of your run.', type='csv')
+    added_file = st.file_uploader('Upload a CSV file of your run.', type='csv', key="main_run_uploader")
 
     if added_file is not None:
         # Unique file fingerprint combining filename and byte size
@@ -676,7 +675,68 @@ def main():
                 # Backpressure
                 bp_analysis = find_backpressure(dataframe_added)
                 
-                # Append parsed values to session state
+                # --- DEVIATION CHECK VIA FILENAME PARSING ---
+                filename_str = added_file.name.rsplit('.', 1)[0]
+                parts = filename_str.split('-')
+                
+                # Determine the exact run index of the file being uploaded
+                run_idx = len(st.session_state.all_csvs)
+                
+                if len(parts) >= 14:
+                    actual_solvent = parts[3]
+                    actual_pct_b = float(parts[6])
+                    actual_ligand = parts[11]
+                    actual_temp = str(parts[13])
+                    
+                    # Fetch expected conditions for this specific run index if present
+                    expected_pct_b = st.session_state.all_pct_bs[run_idx] if run_idx < len(st.session_state.all_pct_bs) else actual_pct_b
+                    expected_solvent = st.session_state.all_solvents[run_idx] if run_idx < len(st.session_state.all_solvents) else actual_solvent
+                    expected_ligand = st.session_state.all_ligands[run_idx] if run_idx < len(st.session_state.all_ligands) else actual_ligand
+                    expected_temp = str(st.session_state.all_temperatures[run_idx]) if run_idx < len(st.session_state.all_temperatures) else actual_temp
+                    
+                    # Check for deviation against expectations
+                    has_pct_b_dev = (actual_pct_b != expected_pct_b)
+                    has_solvent_dev = (actual_solvent != expected_solvent)
+                    has_ligand_dev = (actual_ligand != expected_ligand)
+                    has_temp_dev = (actual_temp != expected_temp)
+                    
+                    if has_pct_b_dev or has_solvent_dev or has_ligand_dev or has_temp_dev:
+                        st.warning(
+                            f"User deviation from method development framework for Run {run_idx + 1}. Actual conditions are:\n"
+                            f"- %B: {actual_pct_b}% (Expected: {expected_pct_b}%)\n"
+                            f"- Solvent: {actual_solvent} (Expected: {expected_solvent})\n"
+                            f"- Ligand: {actual_ligand} (Expected: {expected_ligand})\n"
+                            f"- Temperature: {actual_temp}°C (Expected: {expected_temp}°C)"
+                        )
+                        
+                        # Increment selectivity progression if solvent, temp, or ligand changed unexpectedly
+                        if has_solvent_dev or has_temp_dev or has_ligand_dev:
+                            if 'selectivity_progression' not in st.session_state:
+                                st.session_state.selectivity_progression = 0
+                            st.session_state.selectivity_progression += 1
+                    
+                    # Store/Correct the ACTUAL conditions for this specific run at index [run_idx]
+                    if run_idx < len(st.session_state.all_pct_bs):
+                        st.session_state.all_pct_bs[run_idx] = actual_pct_b
+                    else:
+                        st.session_state.all_pct_bs.append(actual_pct_b)
+                        
+                    if run_idx < len(st.session_state.all_solvents):
+                        st.session_state.all_solvents[run_idx] = actual_solvent
+                    else:
+                        st.session_state.all_solvents.append(actual_solvent)
+
+                    if run_idx < len(st.session_state.all_ligands):
+                        st.session_state.all_ligands[run_idx] = actual_ligand
+                    else:
+                        st.session_state.all_ligands.append(actual_ligand)
+                        
+                    if run_idx < len(st.session_state.all_temperatures):
+                        st.session_state.all_temperatures[run_idx] = actual_temp
+                    else:
+                        st.session_state.all_temperatures.append(actual_temp)
+
+                # Append parsed chromatogram values to session state
                 st.session_state.all_csvs.append(dataframe_added)
                 st.session_state.all_peak_counts.append(peak_cnt)
                 st.session_state.all_retention_times.append(retention_analysis['retention_times'])
@@ -685,7 +745,7 @@ def main():
                 st.session_state.all_resolutions_final.append(resolution_analysis['min_res'])
                 st.session_state.all_equilibrated.append(bp_analysis['equilibrated'])
                 st.session_state.all_backpressures.append(bp_analysis['backpressure'])
-                
+
                 # Mark file as processed
                 st.session_state.processed_file_ids.add(file_id)
                 st.success(f"Successfully processed {added_file.name}!")
