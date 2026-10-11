@@ -443,7 +443,65 @@ def main():
     # Title & instructions
     st.title("Ahmed's HPLC Method Development Engine in Python")
     st.text('Edit the specifications and run conditions to match your method. An example is provided. Hover over the (?) icon for information.')
-    
+    if chromatogram_file is not None:
+        # Click if first run conditions need initialization
+        if 'all_pct_bs' not in st.session_state or len(st.session_state.all_pct_bs) == 0:
+            
+            mode = st.radio(
+                "Select Initial Conditions Input Mode:",
+                ["Automatic (Parse from Filename)", "Manual Input"],
+                horizontal=True
+            )
+
+            if mode == "Automatic (Parse from Filename)":
+                # Extract base filename without extension
+                filename_str = chromatogram_file.name.rsplit('.', 1)[0]
+                parts = filename_str.split('-')
+
+                if len(parts) >= 14:
+                    # Direct string parsing according to naming convention
+                    solvent_auto = parts[3]
+                    percent_b_auto = float(parts[6])
+                    flow_rate_auto = float(parts[7])
+                    ligand_auto = parts[11]
+                    temp_auto = parts[13]
+
+                    # Parse dimensions string (e.g. 150x4.6x5)
+                    dim_parts = parts[12].lower().split('x')
+                    length_auto = float(dim_parts[0])
+                    internal_auto = float(dim_parts[1])
+                    particle_size_auto = float(dim_parts[2])
+
+                    # Default physical column properties
+                    particle_type_auto = "Fully Porous"
+                    poresize_auto = "100Å"
+                    coreshell_auto = "No"
+                    carbon_load_auto = "High"
+
+                    st.success("Successfully parsed initial conditions from filename:")
+                    st.write({
+                        "%B": percent_b_auto, "Solvent": solvent_auto, "Ligand": ligand_auto,
+                        "Temp": temp_auto, "Flow Rate": flow_rate_auto, 
+                        "Dimensions (L x ID x dp)": f"{length_auto} x {internal_auto} x {particle_size_auto}"
+                    })
+
+                    if st.button("Confirm automatic conditions for the first run", type="primary"):
+                        st.session_state.all_pct_bs.append(percent_b_auto)
+                        st.session_state.all_solvents.append(solvent_auto)
+                        st.session_state.all_ligands.append(ligand_auto)
+                        st.session_state.all_bead_types.append(particle_type_auto)
+                        st.session_state.all_pore_sizes.append(poresize_auto)
+                        st.session_state.all_coreshells.append(coreshell_auto)
+                        st.session_state.all_carbon_loads.append(carbon_load_auto)
+                        st.session_state.all_column_lengths.append(length_auto)
+                        st.session_state.all_internal_diameters.append(internal_auto)
+                        st.session_state.all_particle_sizes.append(particle_size_auto)
+                        st.session_state.all_flow_rates.append(flow_rate_auto)
+                        st.session_state.all_temperatures.append(temp_auto)
+                        st.rerun()
+
+                else:
+                    st.error("Uploaded filename does not match the expected naming format. Please switch to Manual Input.")
     leftside, rightside = st.columns(2)
     # Left side of page: not column.
     with leftside:
