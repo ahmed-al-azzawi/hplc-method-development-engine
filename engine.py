@@ -1,6 +1,7 @@
+# ==============================================================================
+# HPLC METHOD DEVELOPMENT ENGINE IN PYTHON
+# ==============================================================================
 
-
-# Necessary imports
 import sys
 from streamlit.web import cli as stcli
 import streamlit as st
@@ -8,9 +9,16 @@ import pandas as pd
 import chardet
 import numpy as np
 import io
+from scipy.stats import linregress
+from math import ceil
+
+st.session_state.pending_ligand_change = False
+st.session_state.tr_slope = 0
+st.session_state.tr_intercept = 0
+st.session_state.tr_tzero = 0
+
 
 def safe_read(uploaded_file):
-    # A way to read the file without risk of encoding errors.
     # 1. Detect encoding
     raw_bytes = uploaded_file.getvalue()
     detected = chardet.detect(raw_bytes)
@@ -95,6 +103,44 @@ def peak_count(df):
     raw_val = df.iloc[row_of_match, 1]
     return int(raw_val)
 
+def find_resolution(df, peaks):
+    colnum = 15  # Column P
+    res_col = df.iloc[:, colnum]
+    target_string = 'Resolution'
+    
+    matches = res_col.astype(str).str.contains(target_string, case=False, na=False)
+    
+    if not matches.any():
+        raise ValueError(f"'{target_string}' header was not found in column {colnum} of the CSV.")
+    
+    # Starts 1 row below the 'Resolution' header
+    start_row = matches.values.argmax() + 1
+    resolutions = []
+    
+    for peak in range(peaks):
+        val = df.iloc[start_row + peak, colnum]
+        
+        # Safely parse numeric values (handles strings like '-', 'N/A', or NaNs)
+        try:
+            parsed_val = float(val)
+        except (ValueError, TypeError):
+            parsed_val = 0.0
+            
+        # Ignore zero or negative resolution values completely
+        if parsed_val > 0.0:
+            resolutions.append(parsed_val)
+    
+    # Calculate min resolution solely from non-zero values
+    min_res = float(min(resolutions, default=0.0))
+    
+    output = {
+        "resolutions": resolutions,
+        "min_res": min_res,
+        "min_res_no_zero": min_res
+    }
+    
+    return output
+
 def find_backpressure(df):
     first_col = df.iloc[:, 0].astype(str)
     
@@ -157,43 +203,6 @@ def find_backpressure(df):
     output = {
         'backpressure': avg_pressure,
         'equilibrated': equilibrated
-    }
-    
-    return output
-
-def find_resolution(df, peaks):
-    colnum = 15  # Column P
-    res_col = df.iloc[:, colnum]
-    target_string = 'Resolution'
-    
-    matches = res_col.astype(str).str.contains(target_string, case=False, na=False)
-    
-    if not matches.any():
-        raise ValueError(f"'{target_string}' header was not found in column {colnum} of the CSV.")
-    
-    # Starts 1 row below the 'Resolution' header
-    start_row = matches.values.argmax() + 1
-    resolutions = []
-    
-    for peak in range(peaks):
-        val = df.iloc[start_row + peak, colnum]
-        
-        # Safely parse numeric values (handles strings like '-', 'N/A', or NaNs)
-        try:
-            parsed_val = float(val)
-        except (ValueError, TypeError):
-            parsed_val = 0.0
-            
-        resolutions.append(parsed_val)
-    
-    # Correct list comprehension syntax: [x for x in resolutions if ...]
-    non_zero_resolutions = [x for x in resolutions if x > 0.0]
-    
-    output = {
-        "resolutions": resolutions,
-        "min_res": float(min(resolutions)) if resolutions else 0.0,
-        # Uses default parameter to prevent crash if no non-zero resolution exists
-        "min_res_no_zero": float(min(non_zero_resolutions, default=0.0))
     }
     
     return output
@@ -383,6 +392,7 @@ def handle_selectivity(prev_b=False):
 
             st.session_state.all_solvents.append(new_solvent)
             st.session_state.all_pct_bs.append(round(converted_b, 1))
+            
             modified_parameters.extend(['all_temperatures', 'all_pct_bs', 'all_solvents'])
             
             st.info(
@@ -437,14 +447,19 @@ def handle_selectivity(prev_b=False):
         if key in st.session_state and st.session_state[key]:
             st.session_state[key].append(st.session_state[key][-1])
 
-
 def main():
+    # --------------------------------------------------------------------------
+    # Page Configuration & Header
+    # --------------------------------------------------------------------------
     st.set_page_config(layout='wide')
-    # Title & instructions
+    
     st.title("Ahmed's HPLC Method Development Engine in Python")
-    st.text('Edit the specifications and run conditions to match your method. An example is provided. Hover over the (?) icon for information.')
+    st.text('Edit the specifications and run conditions to match your method. An example is provided. Hover over the (?) icon for information. Make sure to submit your changes.')
+    st.text('Additionally, you may automatically input the CSV of your first run to fill out the run conditions automatically.')
+    chromatogram_file = st.file_uploader("Upload Chromatogram CSV", type=["csv"])
+
     if chromatogram_file is not None:
-        # Click if first run conditions need initialization
+        # Check if first run conditions need initialization
         if 'all_pct_bs' not in st.session_state or len(st.session_state.all_pct_bs) == 0:
             
             mode = st.radio(
@@ -502,10 +517,23 @@ def main():
 
                 else:
                     st.error("Uploaded filename does not match the expected naming format. Please switch to Manual Input.")
+    
+    # --------------------------------------------------------------------------
+    # Main Layout Split (2 Columns)
+    # --------------------------------------------------------------------------
     leftside, rightside = st.columns(2)
-    # Left side of page: not column.
+    
+    # ligand change notification
+    if st.session_state.pending_ligand_change == True:
+        st.warning('The ligand needs to change after the last run. Please select a new ligand and make sure to submit your changes.')
+        if st.button('I understand'): 
+            st.session_state.pending_ligand_change == False
+            st.rerun()
+
+    # ==========================================================================
+    # LEFT COLUMN: Specifications & Run Conditions
+    # ==========================================================================
     with leftside:
-        # Border wrapping
         with st.container(border=True):
             # --- Section: Method Specifications ---
             st.header('Method Specifications')
@@ -589,9 +617,10 @@ def main():
                 
             st.caption('Temperature is controlled by the column oven.')
 
-    # What concerns the column
+    # ==========================================================================
+    # RIGHT COLUMN: Column Properties & Packing
+    # ==========================================================================
     with rightside:
-        # Border wrapping
         with st.container(border=True):
             # --- Section: Column Dimensions ---
             st.header('Column Dimensions')
@@ -619,6 +648,8 @@ def main():
             particle_typef = st.text_input('Bead Type', value='FPP')
             coreshellf = st.checkbox('Coreshell?', value=False)
             poresizef = st.number_input('Pore Size (Å)', min_value=0.0, value=140.0)
+
+    # Uploading & Processing of a file
     default_keys = [
         'all_csvs',
         'all_peak_counts',
@@ -640,13 +671,29 @@ def main():
         'all_particle_sizes',
         'all_flow_rates',
         'all_temperatures',
-        'all_sample_concentrations'
+        'all_sample_concentrations',
+        'minbdone'
     ]
 
     for key in default_keys:
         if key not in st.session_state:
             st.session_state[key] = []
-
+    
+    # Adding the first run values
+    if st.button('Submit first run conditions (manual mode, if your file naming is not understood)'):
+        st.session_state.all_pct_bs.append(percent_bf)
+        st.session_state.all_solvents.append(solventf)
+        st.session_state.all_ligands.append(ligandf)
+        st.session_state.all_bead_types.append(particle_typef)
+        st.session_state.all_pore_sizes.append(poresizef)
+        st.session_state.all_coreshells.append(coreshellf)
+        st.session_state.all_carbon_loads.append(carbon_loadf)
+        st.session_state.all_column_lengths.append(lengthf)
+        st.session_state.all_internal_diameters.append(internalf)
+        st.session_state.all_particle_sizes.append(particle_sizef)
+        st.session_state.all_flow_rates.append(flow_ratef)
+        st.session_state.all_temperatures.append(tempf)
+    
     # Tracker set to prevent re-parsing on every Streamlit page re-render
     if 'processed_file_ids' not in st.session_state:
         st.session_state.processed_file_ids = set()
@@ -752,6 +799,7 @@ def main():
                 
             except Exception as e:
                 st.error(f"Error parsing {added_file.name}: {e}")
+    # Optional View
     with st.expander("🔍 View Raw Parsed Values (Session State)", expanded=False):
         if len(st.session_state.all_csvs) == 0:
             st.info("No files have been parsed yet. Upload a CSV to view extracted data.")
@@ -775,8 +823,10 @@ def main():
                 "resolutions_overall": st.session_state.all_resolutions_overall,
                 "resolutions_final": st.session_state.all_resolutions_final,
                 "equilibrated": st.session_state.all_equilibrated,
-                "backpressures": st.session_state.all_backpressures
+                "backpressures": st.session_state.all_backpressures,
+                "percent bs": st.session_state.all_pct_bs
             })
+    
     # Processing of decisions
     if st.button('Click to acquire conditions of next run, according to this run.'):
         # Guard check: Ensure at least one run has been uploaded and parsed
@@ -836,71 +886,96 @@ def main():
 
                 # 3b. Optimization Decision Trigger
                 elif latest_runtime < runspec:
-                    st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) < Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) < Spec ({runspec} min) | $R_s$: {latest_resolution:.2f}")
-                    st.session_state.choice1 = min_b(runspec)
-                    st.session_state.choice2 = int_pct_b()
-                    st.session_state.show_decision_radio = True
+                    if not st.session_state.minbdone:
+                        st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) < Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) < Spec ({runspec} min) | $R_s$: {latest_resolution:.2f}")
+                        st.session_state.choice1 = min_b(runspec)
+                        st.session_state.choice2 = int_pct_b()
+                        st.session_state.minbdone = True
+                        st.session_state.show_decision_radio = True
+                    else:
+                        st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) < Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) < Spec ({runspec} min) | $R_s$: {latest_resolution:.2f}")
+                        handle_selectivity()
                 
                 elif latest_runtime > runspec:
                     st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) < Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) > Spec ({runspec} min) | $R_s$: {latest_resolution:.2f}")
                     # Where runtime above spec, and less than spec peaks, return to previous %B and change selectivity.
                     handle_selectivity(True)
             
-            elif latest_peaks == peakspec:
-                # 1. Define criteria thresholds
-                pass_runtime = latest_runtime <= runspec
-                runtime_far_below = latest_runtime < (0.5 * runspec)  # tR << Spec
-                pass_resolution = latest_resolution >= res_spec
+                elif latest_peaks == peakspec:
+                    # 1. Define criteria thresholds
+                    tR_far_below = latest_runtime < (0.5 * runspec)  # tR << spec
+                    tR_below = latest_runtime < runspec and not tR_far_below  # tR < spec
+                    tR_above = latest_runtime > runspec  # tR > spec
+                    
+                    pass_resolution = latest_resolution >= res_spec  # Rs > spec
 
-                # ------------------------------------------------------------------
-                # CASE A: All specifications MET (Rs >= spec AND tR <= spec)
-                # ------------------------------------------------------------------
-                if pass_runtime and pass_resolution:
-                    if runtime_far_below:
-                        st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) << Spec ({runspec} min) | $R_s$ ({latest_resolution:.2f}) >= Spec ({res_spec})")
-                        st.info(
-                            f"**Next Run Strategy:** Method MET. %B and Selectivity parameters are frozen.\n\n"
-                            f"*Observation:* Run time ({latest_runtime:.1f} min) is far below target (≤{runspec} min).\n\n"
-                            f"*Optional Recommendation:* Move to Efficiency Cycle (Flow Chart 2) to increase flow rate and shorten run time further.\n\n"
-                            f"*Controlled by:* Pump | *Category:* Mechanical | *Cycle:* Efficiency (N)"
-                        )
-                    else:
-                        st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) <= Spec ({runspec} min) | $R_s$ ({latest_resolution:.2f}) >= Spec ({res_spec})")
-                        st.success(
-                            f"🎉 **Method Development Complete!** All specifications satisfied.\n\n"
-                            f"*Peak Count:* {latest_peaks}/{peakspec} | *Run Time:* {latest_runtime:.1f} min (Target: ≤{runspec} min) | *Resolution:* {latest_resolution:.2f} (Target: ≥{res_spec})\n\n"
-                            f"*Status:* Method MET. No further parameter adjustments required."
-                        )
+                    static_keys = [
+                        'all_solvents', 'all_ligands', 'all_bead_types',
+                        'all_pore_sizes', 'all_pct_bs', 'all_coreshells', 
+                        'all_carbon_loads', 'all_column_lengths', 
+                        'all_internal_diameters', 'all_particle_sizes',
+                        'all_flow_rates', 'all_temperatures'
+                    ]
 
-                # ------------------------------------------------------------------
-                # CASE B: Peak count met, but Run Time or Resolution failed -> Direct to FC2
-                # ------------------------------------------------------------------
-                else:
-                    if runtime_far_below and not pass_resolution:
-                        st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) << Spec ({runspec} min) | $R_s$ ({latest_resolution:.2f}) < Spec ({res_spec})")
-                        reason = (
-                            f"Peak count met ({latest_peaks}/{peakspec}), but Resolution is below specification ({latest_resolution:.2f} < {res_spec}). "
-                            f"Run time is very short ({latest_runtime:.1f} min < {0.5 * runspec:.1f} min)."
-                        )
-                    elif not pass_resolution and not pass_runtime:
-                        st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) > Spec ({runspec} min) | $R_s$ ({latest_resolution:.2f}) < Spec ({res_spec})")
-                        reason = (
-                            f"Resolution is below specification ({latest_resolution:.2f} < {res_spec}) "
-                            f"AND Run Time exceeds specification ({latest_runtime:.1f} min > {runspec} min)."
-                        )
-                    elif not pass_resolution:
-                        st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) <= Spec ({runspec} min) | $R_s$ ({latest_resolution:.2f}) < Spec ({res_spec})")
-                        reason = f"Resolution is below specification ({latest_resolution:.2f} < {res_spec})."
-                    else:
-                        st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) > Spec ({runspec} min) | $R_s$ ({latest_resolution:.2f}) >= Spec ({res_spec})")
-                        reason = f"Run Time exceeds specification ({latest_runtime:.1f} min > {runspec} min)."
+                    # ------------------------------------------------------------------
+                    # GROUP 1: tR << spec
+                    # ------------------------------------------------------------------
+                    if tR_far_below:
+                        if pass_resolution:
+                            st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) << Spec ({runspec} min) | $R_s$ ({latest_resolution:.2f}) >= Spec ({res_spec})")
+                            st.success(
+                                "🎉 **Method MET!** Optionally increase Flow Rate ($F$) to shorten the run time further.\n\n"
+                                "*Cycle:* Efficiency (N)"
+                            )
+                        else:
+                            st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) << Spec ({runspec} min) | $R_s$ ({latest_resolution:.2f}) < Spec ({res_spec})")
+                            st.info(
+                                "**Next Run Strategy:** Increase Column Length ($L$) (watch BP) OR decrease Flow Rate ($F$) OR decrease Particle Size ($dp$) (watch BP) OR switch to Core-Shell (SPP).\n\n"
+                                "*Controlled by:* Column / Pump | *Cycle:* Efficiency (N)"
+                            )
 
-                    st.info(
-                        f"**Next Run Strategy:** Direct to Efficiency Cycle (Flow Chart 2). %B and Selectivity parameters are frozen to preserve peak separation.\n\n"
-                        f"*Reason:* {reason}\n\n"
-                        f"*Controlled by:* Pump (Flow Rate) / Column (Dimensions, Particle Size) | *Category:* Mechanical | *Cycle:* Efficiency (N)"
-                    )
-        if st.session_state.get('show_decision_radio', False):
+                    # ------------------------------------------------------------------
+                    # GROUP 2: tR < spec
+                    # ------------------------------------------------------------------
+                    elif tR_below:
+                        if pass_resolution:
+                            st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) < Spec ({runspec} min) | $R_s$ ({latest_resolution:.2f}) >= Spec ({res_spec})")
+                            st.success(
+                                "🎉 **Method MET!** Optionally increase Flow Rate ($F$) to shorten the run time further.\n\n"
+                                "*Cycle:* Efficiency (N)"
+                            )
+                        else:
+                            st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) < Spec ({runspec} min) | $R_s$ ({latest_resolution:.2f}) < Spec ({res_spec})")
+                            st.info(
+                                "**Next Run Strategy:** Decrease Flow Rate ($F$) OR decrease Particle Size ($dp$) (watch BP) OR switch to Core-Shell (SPP).\n\n"
+                                "*Controlled by:* Pump / Column | *Cycle:* Efficiency (N)"
+                            )
+
+                    # ------------------------------------------------------------------
+                    # GROUP 3: tR > spec
+                    # ------------------------------------------------------------------
+                    elif tR_above:
+                        if pass_resolution:
+                            st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) > Spec ({runspec} min) | $R_s$ ({latest_resolution:.2f}) >= Spec ({res_spec})")
+                            st.info(
+                                "**Next Run Strategy:** Increase Flow Rate ($F$) to shorten the run time.\n\n"
+                                "*Controlled by:* Pump | *Cycle:* Efficiency (N)"
+                            )
+                        else:
+                            st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) > Spec ({runspec} min) | $R_s$ ({latest_resolution:.2f}) < Spec ({res_spec})")
+                            st.info(
+                                "**Next Run Strategy:** Decrease Particle Size ($dp$) (watch BP), then increase Flow Rate ($F$) to shorten the run time.\n\n"
+                                "*Controlled by:* Column / Pump | *Cycle:* Efficiency (N)"
+                            )
+
+                    # Propagate static chromatographic parameters to the next run
+                    for key in static_keys:
+                        st.session_state[key].append(st.session_state[key][-1])
+                    st.session_state.show_decision_radio = False
+                    
+
+    # Persistent Decision Radio Block (outside st.button to maintain state)
+    if st.session_state.get('show_decision_radio', False):
         choice1 = st.session_state.choice1
         choice2 = st.session_state.choice2
         # %B = (log10(k) - intercept) / slope
@@ -911,7 +986,7 @@ def main():
         expected_intb_tr = (10 ** expected_intb_logk) * st.session_state.tr_tzero + st.session_state.tr_tzero 
         choice_made = st.radio(
             f'Select whether to proceed with Intermediate %B ({choice2}%), or Minimum %B ({choice1}%):\n\n'
-            f'Expected runtime at Intermediate %B is {expected_intb_tr} min. Expected runtime at Minimum %B: {runspec} min',
+            f'Expected runtime at Intermediate %B is {ceil(expected_intb_tr)} min. Expected runtime at Minimum %B: {runspec} min',
             ['Not Selected', 'Min%B', 'Intermediate %B']
         )
         print(choice1)
@@ -950,7 +1025,8 @@ def main():
                 st.success(f"Added %B condition: {selected_b}% for next run!")
                 st.session_state.show_decision_radio = False
                 st.rerun()
-     if st.session_state.get('all_backpressures') and len(st.session_state.all_backpressures) > 0:
+        
+    if st.session_state.get('all_backpressures') and len(st.session_state.all_backpressures) > 0:
         st.subheader("📜 Historical Run Record & Decisions")
 
         # Build history records list safely
@@ -1056,8 +1132,11 @@ def main():
             """,
             unsafe_allow_html=True
         )
-
-  if __name__ == "__main__":
+                    
+# ==============================================================================
+# ENTRY POINT (Allows execution via double-click or CLI)
+# ==============================================================================
+if __name__ == "__main__":
     if not st.runtime.exists():
         sys.argv = ["streamlit", "run", __file__]
         sys.exit(stcli.main())
