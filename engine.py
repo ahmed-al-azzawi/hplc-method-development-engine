@@ -11,12 +11,226 @@ import numpy as np
 import io
 from scipy.stats import linregress
 from math import ceil
+from plotly import graph_objects as go
+import random
+from scipy.optimize import linear_sum_assignment
 
 st.session_state.pending_ligand_change = False
 st.session_state.tr_slope = 0
 st.session_state.tr_intercept = 0
 st.session_state.tr_tzero = 0
 
+def safe_min_b(tr):
+    try:
+        return min_b(tr)
+    except Exception as e:
+        st.info(f"ℹ️ Not enough valid data points for Min %B calculation ({e}). Falling back to current %B baseline.")
+        if st.session_state.all_pct_bs:
+            print(f"[DEBUG safe_min_b] Falling back to last known %B: {st.session_state.all_pct_bs[-1]}%")
+            print(e)
+            return float(st.session_state.all_pct_bs[-1])
+        return 50.0
+
+def safe_int_pct_b():
+    try:
+        return int_pct_b()
+    except Exception as e:
+        if st.session_state.all_pct_bs:
+            print(f"[DEBUG safe_int_pct_b] Falling back to last known %B: {st.session_state.all_pct_bs[-1]}%")
+            print(e)
+            return float(st.session_state.all_pct_bs[-1])
+        return 50.0
+
+def evaluate_next_run_conditions(peakspec, runspec, res_spec, bpspec):
+    """
+    Evaluates chromatographic metrics of the latest run and outputs the next strategy automatically.
+    """
+    if not st.session_state.get('all_backpressures'):
+        return
+
+    latest_bp = st.session_state.all_backpressures[-1]
+    latest_peaks = st.session_state.all_peak_counts[-1]
+    latest_runtime = st.session_state.all_run_times[-1]
+    latest_resolution = st.session_state.all_resolutions_final[-1]
+    run_count = len(st.session_state.all_backpressures)
+    
+    static_keys = [
+        'all_solvents', 'all_ligands', 'all_bead_types',
+        'all_pore_sizes', 'all_coreshells', 'all_carbon_loads',
+        'all_column_lengths', 'all_internal_diameters', 
+        'all_particle_sizes', 'all_flow_rates', 'all_temperatures'
+    ]
+
+    # 1. Backpressure Check
+    if latest_bp > bpspec:
+        st.caption(f"📊 **Run Metrics:** Backpressure ({latest_bp:.1f} bar) > Spec ({bpspec:.1f} bar) | Peaks: {latest_peaks}/{peakspec}")
+        st.warning(f'Run number {run_count} exceeded backpressure limit!')
+
+    # 2. Too Many Peaks
+    elif latest_peaks > peakspec:
+        st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) > Spec ({peakspec}) | $t_R$: {latest_runtime:.1f} min | $R_s$: {latest_resolution:.2f}")
+        st.warning(f'Run number {run_count} has more peaks than expected. Investigate for contamination.')
+
+    # 3. Fewer Peaks Than Spec
+    elif latest_peaks < peakspec:
+        if latest_runtime < (0.5 * runspec):
+            st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) < Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) << Spec ({runspec} min) | $R_s$: {latest_resolution:.2f}")
+            current_pct_b = st.session_state.all_pct_bs[-1]
+            new_pct_b = current_pct_b - 10.0
+            
+            st.info(
+                f"**Next Run Strategy:** Decrease %B by 10% (from {current_pct_b}% to {new_pct_b}%)\n\n"
+                f"*Controlled by:* Pump | *Cycle:* Retention"
+            )
+            st.session_state.all_pct_bs.append(new_pct_b)
+            for key in static_keys:
+                st.session_state[key].append(st.session_state[key][-1])
+
+        elif latest_runtime < runspec:
+            if not st.session_state.get('minbdone', False):
+                st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) < Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) < Spec ({runspec} min) | $R_s$: {latest_resolution:.2f}")
+                
+                c1 = safe_min_b(runspec)
+                c2 = safe_int_pct_b()
+                st.session_state.choice1 = c1
+                st.session_state.choice2 = c2
+                st.info(
+                    f"**Next Run Strategy Options:**\n"
+                    f"- Option A (Min %B): Set %B to {c1}%\n"
+                    f"- Option B (Int %B): Set %B to {c2}%\n\n"
+                    f"*Controlled by:* Pump | *Cycle:* Retention"
+                )
+                st.session_state.show_decision_radio = True
+                st.session_state.minbdone = True
+            else:
+                st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) < Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) < Spec ({runspec} min) | min%B already executed -> Triggering Selectivity.")
+                handle_selectivity(prev_b=False)
+
+        elif latest_runtime > runspec:
+            st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) < Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) > Spec ({runspec} min) | $R_s$: {latest_resolution:.2f}")
+            handle_selectivity(prev_b=False)
+
+    # 4. Target Peak Count Met
+    elif latest_peaks == peakspec:
+        tR_far_below = latest_runtime < (0.5 * runspec)
+        tR_below = latest_runtime < runspec and not tR_far_below
+        tR_above = latest_runtime > runspec
+        pass_resolution = latest_resolution >= res_spec
+
+        if tR_far_below:
+            if pass_resolution:
+                st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) << Spec ({runspec} min) | $R_s$ ({latest_resolution:.2f}) >= Spec ({res_spec})")
+                st.success("🎉 **Method MET!** Optionally increase Flow Rate ($F$) to shorten the run time further.\n\n*Cycle:* Efficiency (N)")
+            else:
+                st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) << Spec ({runspec} min) | $R_s$ ({latest_resolution:.2f}) < Spec ({res_spec})")
+                st.info("**Next Run Strategy:** Increase Column Length ($L$) (watch BP) OR decrease Flow Rate ($F$) OR decrease Particle Size ($dp$) (watch BP) OR switch to Core-Shell (SPP).\n\n*Controlled by:* Column / Pump | *Cycle:* Efficiency (N)")
+
+        elif tR_below:
+            if pass_resolution:
+                st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) < Spec ({runspec} min) | $R_s$ ({latest_resolution:.2f}) >= Spec ({res_spec})")
+                st.success("🎉 **Method MET!** Optionally increase Flow Rate ($F$) to shorten the run time further.\n\n*Cycle:* Efficiency (N)")
+            else:
+                st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) < Spec ({runspec} min) | $R_s$ ({latest_resolution:.2f}) < Spec ({res_spec})")
+                st.info("**Next Run Strategy:** Decrease Flow Rate ($F$) OR decrease Particle Size ($dp$) (watch BP) OR switch to Core-Shell (SPP).\n\n*Controlled by:* Pump / Column | *Cycle:* Efficiency (N)")
+
+        elif tR_above:
+            if pass_resolution:
+                st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) > Spec ({runspec} min) | $R_s$ ({latest_resolution:.2f}) >= Spec ({res_spec})")
+                st.info("**Next Run Strategy:** Increase Flow Rate ($F$) to shorten the run time.\n\n*Controlled by:* Pump | *Cycle:* Efficiency (N)")
+            else:
+                st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) > Spec ({runspec} min) | $R_s$ ({latest_resolution:.2f}) < Spec ({res_spec})")
+                st.info("**Next Run Strategy:** Decrease Particle Size ($dp$) (watch BP), then increase Flow Rate ($F$) to shorten the run time.\n\n*Controlled by:* Column / Pump | *Cycle:* Efficiency (N)")
+
+        st.session_state.all_pct_bs.append(st.session_state.all_pct_bs[-1])
+        for key in static_keys:
+            st.session_state[key].append(st.session_state[key][-1])
+
+def generate_selectivity_plot():
+    """Generates a simplified Plotly graph using stored slopes, intercepts, and R^2 values."""
+    slopes = st.session_state.get('slopes', [])
+    intercepts = st.session_state.get('intercepts', [])
+    r_squareds = st.session_state.get('r_squareds', [])
+    pct_bs = st.session_state.get('all_pct_bs', [])
+    
+    if not np.any(slopes) or not np.any(intercepts) or not np.any(pct_bs):
+        return None
+        
+    fig = go.Figure()
+
+    # Define x-axis range based on %B values
+    b_min = max(0, min(pct_bs) - 5)
+    b_max = min(100, max(pct_bs) + 5)
+    b_range = np.linspace(b_min, b_max, 50)
+
+    # Pad r_squareds if shorter than slopes list
+    if len(r_squareds) < len(slopes):
+        r_squareds.extend([0.0] * (len(slopes) - len(r_squareds)))
+
+    # Iterate through slope, intercept, and R^2 triplets
+    for idx, (slope, intercept, rsq) in enumerate(zip(slopes, intercepts, r_squareds)):
+        # Convert values to scalar floats to prevent NumPy format errors
+        slope_val = float(np.asarray(slope).squeeze())
+        intercept_val = float(np.asarray(intercept).squeeze())
+        rsq_val = float(np.asarray(rsq).squeeze())
+
+        y_line = slope_val * b_range + intercept_val
+        
+        # Generate random hex color
+        random_color = f"#{random.randint(0, 0xFFFFFF):06x}"
+        
+        fig.add_trace(go.Scatter(
+            x=b_range,
+            y=y_line,
+            mode='lines',
+            name=f'Peak {idx + 1} (R² = {rsq_val:.6f})',
+            line=dict(color=random_color, width=2)
+        ))
+
+    fig.update_layout(
+        title="Selectivity Plot: log10(k) vs % Organic Solvent (%B)",
+        xaxis_title="% Organic Solvent (%B)",
+        yaxis_title="log10(k)",
+        template="plotly_white",
+        height=450,
+        margin=dict(l=40, r=40, t=50, b=40),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+    )
+    return fig
+
+def determine_selectivity_case(actual_solvent, actual_temp, initial_solvent):
+    """
+    Determines the exact selectivity progression case based on physical run history,
+    using substring matching for robust temperature parsing (e.g. '40.0', 'T40', '40°C').
+    """
+    sol_curr = str(actual_solvent).strip().upper()
+    sol_init = str(initial_solvent).strip().upper()
+    temp_str = str(actual_temp).strip().lower()
+    
+    # Substring detection for temperature values
+    is_40 = "40" in temp_str
+    is_60 = "60" in temp_str
+    
+    is_initial_solvent = (sol_curr == sol_init)
+    
+    # Check historical run temperatures for past temperature steps
+    past_temps = [str(t).strip().lower() for t in st.session_state.get('all_temperatures', [])]
+    had_60 = any("60" in t for t in past_temps)
+    had_40 = any("40" in t for t in past_temps)
+    
+    if is_initial_solvent:
+        if is_60 or had_60:
+            return 2  # At 60 °C -> handle_selectivity does +1 -> Case 3 (Swap to MeOH at amb)
+        elif is_40 or had_40:
+            return 1  # At 40 °C -> handle_selectivity does +1 -> Case 2 (Increase to 60 °C)
+        else:
+            return 0  # At amb -> handle_selectivity does +1 -> Case 1 (Increase to 40 °C)
+    else:
+        if is_60:
+            return 5  # Swapped solvent at 60 °C
+        elif is_40:
+            return 4  # Swapped solvent at 40 °C
+        else:
+            return 3  # Swapped solvent at amb -> handle_selectivity does +1 -> Case 4 (Swapped solvent at 40 °C)
 
 def safe_read(uploaded_file):
     # 1. Detect encoding
@@ -266,63 +480,186 @@ def min_b(tr):
     return float(ceil(min_pct_b))
 
 
-def int_pct_b():
-    # Safe default search bounds without needing passed arguments
-    b_min = float(st.session_state.all_pct_bs[-1])
-    b_max = 80.0
-    step = 0.5
+from scipy.optimize import linear_sum_assignment
+from scipy.stats import linregress
+import numpy as np
+from math import ceil
+import streamlit as st
 
-    ret_times = list(st.session_state.all_retention_times)
-    pct_bs = list(st.session_state.all_pct_bs)
+def int_pct_b():
+    """
+    Calculates the optimal Intermediate %B by fitting linear log10(k) vs %B models,
+    refining peak alignment via Hungarian optimization to eliminate crossover errors,
+    and maximizing worst-case peak separation strictly within the local window of 
+    the last two screening runs that are multiples of 10 (e.g., 40% to 50%).
+    """
+    ret_times = list(st.session_state.get('all_retention_times', []))
+    pct_bs = list(st.session_state.get('all_pct_bs', []))
     
     if not ret_times or len(ret_times) < 2:
         raise ValueError("At least two runs are required to perform linear regression.")
     
-    max_peaks = max(len(sublist) - 1 for sublist in ret_times)
-    curves = []
-    
-    # 1. Fit linear regression models
-    for peak_idx in range(1, max_peaks + 1):
-        xvals, yvals = [], []
-        for run_idx, run_ret_times in enumerate(ret_times):
-            if peak_idx < len(run_ret_times):
-                t0, tR = run_ret_times[0], run_ret_times[peak_idx]
-                if tR > t0 and t0 > 0:
-                    k = (tR - t0) / t0
-                    xvals.append(pct_bs[run_idx])
-                    yvals.append(np.log10(k))
-        
-        if len(xvals) >= 2:
-            res = linregress(xvals, yvals)
-            curves.append((res.slope, res.intercept))
-            
-    if len(curves) < 2:
+    # Calculate exact number of analyte peaks (excluding t0 at index 0)
+    peak_counts = [len(sublist) - 1 for sublist in ret_times if len(sublist) > 1]
+    if not peak_counts:
         return float(ceil(pct_bs[-1]))
         
-    # Cap upper search bound to max %B run so far (or b_max default)
-    actual_b_max = min(b_max, max(pct_bs))
-    speculative_bs = np.arange(b_min, actual_b_max + step, step)
+    max_peaks = max(peak_counts)
+    if max_peaks < 2:
+        return float(ceil(pct_bs[-1]))
+
+    # --------------------------------------------------------------------------
+    # STEP 1: INITIAL DATA MATRIX CONSTRUCTION (Shape: num_runs x max_peaks)
+    # --------------------------------------------------------------------------
+    num_runs = len(ret_times)
+    k_matrix = np.full((num_runs, max_peaks), np.nan, dtype=float)
     
-    slopes = np.array([c[0] for c in curves])[:, np.newaxis]      # Shape: (N_peaks, 1)
-    intercepts = np.array([c[1] for c in curves])[:, np.newaxis]  # Shape: (N_peaks, 1)
+    for run_idx in range(num_runs):
+        if run_idx < len(pct_bs):
+            run_ret_times = ret_times[run_idx]
+            if len(run_ret_times) > 1:
+                t0 = run_ret_times[0]
+                # Populate analyte peaks 1..N into matrix columns 0..(N-1)
+                for peak_idx in range(1, len(run_ret_times)):
+                    if (peak_idx - 1) < max_peaks:
+                        tR = run_ret_times[peak_idx]
+                        if tR > t0 and t0 > 0:
+                            k = (tR - t0) / t0
+                            if k > 0:
+                                k_matrix[run_idx, peak_idx - 1] = np.log10(k)
+
+    def fit_models(data_mat):
+        models = []
+        n_cols = data_mat.shape[1]
+        for p_idx in range(n_cols):
+            y_vals = data_mat[:, p_idx]
+            x_vals = np.array(pct_bs[:num_runs])
+            valid_mask = ~np.isnan(y_vals)
+            
+            if np.sum(valid_mask) >= 2 and len(set(x_vals[valid_mask])) > 1:
+                res = linregress(x_vals[valid_mask], y_vals[valid_mask])
+                r2 = float(res.rvalue ** 2) if not np.isnan(res.rvalue) else 0.0
+                models.append((float(res.slope), float(res.intercept), r2))
+            else:
+                models.append((0.0, 0.0, 0.0))
+        return models
+
+    current_models = fit_models(k_matrix)
+    current_avg_r2 = np.mean([m[2] for m in current_models])
     
-    # 2. Vectorized log(k) and real k conversion: k = 10^(m * %B + c)
-    log_k_grid = slopes * speculative_bs + intercepts
-    k_grid = 10 ** log_k_grid  # Convert back to real k values!
+    # --------------------------------------------------------------------------
+    # STEP 2: ITERATIVE HUNGARIAN OPTIMIZATION (Bipartite Peak Tracking)
+    # --------------------------------------------------------------------------
+    best_k_matrix = k_matrix.copy()
+    best_models = current_models
+    best_avg_r2 = current_avg_r2
+
+    max_iterations = 5
+    for iteration in range(max_iterations):
+        candidate_k_matrix = np.full_like(best_k_matrix, np.nan)
+        
+        for run_idx in range(num_runs):
+            run_pct_b = pct_bs[run_idx]
+            actual_log_ks = best_k_matrix[run_idx, :]
+            valid_indices = np.where(~np.isnan(actual_log_ks))[0]
+            
+            if len(valid_indices) == 0:
+                continue
+                
+            obs_vals = actual_log_ks[valid_indices]
+            n_obs = len(obs_vals)
+            
+            predicted_logs = np.array([m[0] * run_pct_b + m[1] for m in best_models])
+            
+            cost_matrix = np.zeros((n_obs, max_peaks), dtype=float)
+            for i, obs in enumerate(obs_vals):
+                for j, pred in enumerate(predicted_logs):
+                    cost_matrix[i, j] = (obs - pred) ** 2
+
+            row_ind, col_ind = linear_sum_assignment(cost_matrix)
+            
+            for r_idx, c_idx in zip(row_ind, col_ind):
+                candidate_k_matrix[run_idx, c_idx] = obs_vals[r_idx]
+
+        candidate_models = fit_models(candidate_k_matrix)
+        candidate_avg_r2 = np.mean([m[2] for m in candidate_models])
+        
+        no_severe_degradation = all(
+            cand[2] >= (prev[2] - 0.05) for cand, prev in zip(candidate_models, best_models)
+        )
+        
+        if candidate_avg_r2 > best_avg_r2 and no_severe_degradation:
+            best_avg_r2 = candidate_avg_r2
+            best_models = candidate_models
+            best_k_matrix = candidate_k_matrix
+        else:
+            break
+
+    # --------------------------------------------------------------------------
+    # STEP 3: PRESERVE OPTIMIZED CURVES & SESSION STATE
+    # --------------------------------------------------------------------------
+    optimised_curves = best_models
     
-    # 3. Vectorized pairwise difference across all peaks for every %B step
-    pairwise_diffs = np.abs(k_grid[:, np.newaxis, :] - k_grid[np.newaxis, :, :])
-    
-    # Mask out diagonal (self-comparisons)
-    n_peaks = len(curves)
-    diag_mask = ~np.eye(n_peaks, dtype=bool)
-    
-    # Minimum separation across peaks for each speculative %B
-    min_separations = pairwise_diffs[diag_mask, :].reshape(n_peaks - 1, n_peaks, -1).min(axis=(0, 1))
-    
-    # 4. Find %B that maximizes the worst-case real k separation
-    best_idx = np.argmax(min_separations)
-    ideal_pct_b = speculative_bs[best_idx]
+    st.session_state.slopes = [float(c[0]) for c in optimised_curves]
+    st.session_state.intercepts = [float(c[1]) for c in optimised_curves]
+    st.session_state.r_squareds = [round(float(c[2]), 6) for c in optimised_curves]
+
+    if len(optimised_curves) < 2:
+        return float(ceil(pct_bs[-1]))
+        
+    # --------------------------------------------------------------------------
+    # STEP 4: SEPARATION OPTIMIZATION STRICTLY WITHIN LAST TWO MULTIPLE-OF-10 RUNS
+    # --------------------------------------------------------------------------
+    # Filter for unique %B values that are multiples of 10 (e.g. 30, 40, 50)
+    multiple_of_10_bs = []
+    for b in reversed(pct_bs):
+        val = float(b)
+        # Check if value is a multiple of 10 (with floating-point tolerance)
+        if abs(val % 10.0) < 1e-5 or abs(val % 10.0 - 10.0) < 1e-5:
+            if val not in multiple_of_10_bs:
+                multiple_of_10_bs.append(val)
+            if len(multiple_of_10_bs) == 2:
+                break
+
+    if len(multiple_of_10_bs) == 2:
+        b_min = min(multiple_of_10_bs)
+        b_max = max(multiple_of_10_bs)
+    else:
+        # Fallback if two multiple-of-10 runs aren't present yet
+        b_min = max(10.0, float(min(pct_bs)))
+        b_max = min(95.0, float(max(pct_bs)))
+
+    step = 0.5
+    if b_min >= b_max:
+        return float(ceil(pct_bs[-1]))
+
+    speculative_bs = np.arange(b_min, b_max + step, step)
+
+    slopes_arr = np.array([c[0] for c in optimised_curves])[:, np.newaxis]
+    intercepts_arr = np.array([c[1] for c in optimised_curves])[:, np.newaxis]
+
+    # Shape: (N_curves, N_speculative_steps)
+    log_k_grid = slopes_arr * speculative_bs + intercepts_arr
+    n_curves = log_k_grid.shape[0]
+
+    # Pairwise difference tensor shape: (N_curves, N_curves, N_speculative_steps)
+    pairwise_diffs = np.abs(log_k_grid[:, np.newaxis, :] - log_k_grid[np.newaxis, :, :])
+
+    # Mask out self-comparisons
+    diag_mask = ~np.eye(n_curves, dtype=bool)
+
+    # Extract off-diagonal peak pairs -> Shape: (N*(N-1), N_speculative_steps)
+    off_diag_diffs = pairwise_diffs[diag_mask, :]
+
+    # Minimum peak separation for each speculative %B step inside the window
+    min_separations = off_diag_diffs.min(axis=0)
+
+    # Select %B index that maximizes worst-case separation within local bounds
+    best_idx = int(np.argmax(min_separations))
+    ideal_pct_b = float(speculative_bs[best_idx])
+
+    print(f"[DEBUG int_pct_b] Multiples-of-10 Window: [{b_min}%, {b_max}%]. Optimal %B found: {ideal_pct_b}%")
+
     return float(round(ideal_pct_b, 1))
 
 
@@ -456,7 +793,7 @@ def main():
     st.title("Ahmed's HPLC Method Development Engine in Python")
     st.text('Edit the specifications and run conditions to match your method. An example is provided. Hover over the (?) icon for information. Make sure to submit your changes.')
     st.text('Additionally, you may automatically input the CSV of your first run to fill out the run conditions automatically.')
-    chromatogram_file = st.file_uploader("Upload Chromatogram CSV", type=["csv"])
+    print('''chromatogram_file = st.file_uploader("Upload Chromatogram CSV", type=["csv"])
 
     if chromatogram_file is not None:
         # Check if first run conditions need initialization
@@ -517,7 +854,7 @@ def main():
 
                 else:
                     st.error("Uploaded filename does not match the expected naming format. Please switch to Manual Input.")
-    
+    ''')
     # --------------------------------------------------------------------------
     # Main Layout Split (2 Columns)
     # --------------------------------------------------------------------------
@@ -722,66 +1059,108 @@ def main():
                 # Backpressure
                 bp_analysis = find_backpressure(dataframe_added)
                 
-                # --- DEVIATION CHECK VIA FILENAME PARSING ---
+                # --- FILENAME PARSING ---
                 filename_str = added_file.name.rsplit('.', 1)[0]
                 parts = filename_str.split('-')
                 
-                # Determine the exact run index of the file being uploaded
+                # Determine current run index
                 run_idx = len(st.session_state.all_csvs)
                 
                 if len(parts) >= 14:
-                    actual_solvent = parts[3]
+                    actual_solvent = parts[3].strip()
                     actual_pct_b = float(parts[6])
-                    actual_ligand = parts[11]
-                    actual_temp = str(parts[13])
+                    actual_flow = float(parts[7])
+                    actual_ligand = parts[11].strip()
+                    actual_temp = str(parts[13]).strip()
                     
-                    # Fetch expected conditions for this specific run index if present
-                    expected_pct_b = st.session_state.all_pct_bs[run_idx] if run_idx < len(st.session_state.all_pct_bs) else actual_pct_b
-                    expected_solvent = st.session_state.all_solvents[run_idx] if run_idx < len(st.session_state.all_solvents) else actual_solvent
-                    expected_ligand = st.session_state.all_ligands[run_idx] if run_idx < len(st.session_state.all_ligands) else actual_ligand
-                    expected_temp = str(st.session_state.all_temperatures[run_idx]) if run_idx < len(st.session_state.all_temperatures) else actual_temp
-                    
-                    # Check for deviation against expectations
-                    has_pct_b_dev = (actual_pct_b != expected_pct_b)
-                    has_solvent_dev = (actual_solvent != expected_solvent)
-                    has_ligand_dev = (actual_ligand != expected_ligand)
-                    has_temp_dev = (actual_temp != expected_temp)
-                    
-                    if has_pct_b_dev or has_solvent_dev or has_ligand_dev or has_temp_dev:
-                        st.warning(
-                            f"User deviation from method development framework for Run {run_idx + 1}. Actual conditions are:\n"
-                            f"- %B: {actual_pct_b}% (Expected: {expected_pct_b}%)\n"
-                            f"- Solvent: {actual_solvent} (Expected: {expected_solvent})\n"
-                            f"- Ligand: {actual_ligand} (Expected: {expected_ligand})\n"
-                            f"- Temperature: {actual_temp}°C (Expected: {expected_temp}°C)"
-                        )
-                        
-                        # Increment selectivity progression if solvent, temp, or ligand changed unexpectedly
-                        if has_solvent_dev or has_temp_dev or has_ligand_dev:
-                            if 'selectivity_progression' not in st.session_state:
-                                st.session_state.selectivity_progression = 0
-                            st.session_state.selectivity_progression += 1
-                    
-                    # Store/Correct the ACTUAL conditions for this specific run at index [run_idx]
-                    if run_idx < len(st.session_state.all_pct_bs):
-                        st.session_state.all_pct_bs[run_idx] = actual_pct_b
-                    else:
-                        st.session_state.all_pct_bs.append(actual_pct_b)
-                        
-                    if run_idx < len(st.session_state.all_solvents):
-                        st.session_state.all_solvents[run_idx] = actual_solvent
-                    else:
-                        st.session_state.all_solvents.append(actual_solvent)
+                    # Parse dimensions (e.g., 150x4.6x5)
+                    dim_parts = parts[12].lower().split('x')
+                    actual_length = float(dim_parts[0]) if len(dim_parts) > 0 else 150.0
+                    actual_id = float(dim_parts[1]) if len(dim_parts) > 1 else 4.6
+                    actual_particle_size = float(dim_parts[2]) if len(dim_parts) > 2 else 5.0
 
-                    if run_idx < len(st.session_state.all_ligands):
-                        st.session_state.all_ligands[run_idx] = actual_ligand
-                    else:
+                    # Standard defaults for physical column properties
+                    actual_bead_type = "FPP"
+                    actual_pore_size = 140.0
+                    actual_coreshell = False
+                    actual_carbon_load = 11.0
+                    
+                    # ----------------------------------------------------------
+                    # CASE A: FIRST RUN INITIALIZATION (run_idx == 0)
+                    # ----------------------------------------------------------
+                    if run_idx == 0 or len(st.session_state.all_pct_bs) == 0:
+                        st.session_state.all_pct_bs.append(actual_pct_b)
+                        st.session_state.all_solvents.append(actual_solvent)
                         st.session_state.all_ligands.append(actual_ligand)
-                        
-                    if run_idx < len(st.session_state.all_temperatures):
-                        st.session_state.all_temperatures[run_idx] = actual_temp
-                    else:
                         st.session_state.all_temperatures.append(actual_temp)
+                        st.session_state.all_flow_rates.append(actual_flow)
+                        st.session_state.all_column_lengths.append(actual_length)
+                        st.session_state.all_internal_diameters.append(actual_id)
+                        st.session_state.all_particle_sizes.append(actual_particle_size)
+                        st.session_state.all_bead_types.append(actual_bead_type)
+                        st.session_state.all_pore_sizes.append(actual_pore_size)
+                        st.session_state.all_coreshells.append(actual_coreshell)
+                        st.session_state.all_carbon_loads.append(actual_carbon_load)
+                        
+                        st.info(
+                            f"🚀 **First Run Initialized from Filename:** %B: {actual_pct_b}%, "
+                            f"Solvent: {actual_solvent}, Column: {actual_ligand} ({actual_length}x{actual_id}mm, {actual_particle_size}µm), "
+                            f"Temp: {actual_temp}°C, Flow: {actual_flow} mL/min"
+                        )
+                    
+                    # ----------------------------------------------------------
+                    # CASE B: SUBSEQUENT RUNS & DEVIATION CHECK (run_idx > 0)
+                    # ----------------------------------------------------------
+                    else:
+                        # Fetch expected conditions for this specific run index
+                        expected_pct_b = st.session_state.all_pct_bs[run_idx] if run_idx < len(st.session_state.all_pct_bs) else actual_pct_b
+                        expected_solvent = str(st.session_state.all_solvents[run_idx]).strip() if run_idx < len(st.session_state.all_solvents) else actual_solvent
+                        expected_ligand = str(st.session_state.all_ligands[run_idx]).strip() if run_idx < len(st.session_state.all_ligands) else actual_ligand
+                        expected_temp = str(st.session_state.all_temperatures[run_idx]).strip() if run_idx < len(st.session_state.all_temperatures) else actual_temp
+                        
+                        # Check for deviations against expectations
+                        has_pct_b_dev = (actual_pct_b != expected_pct_b)
+                        has_solvent_dev = (actual_solvent.upper() != expected_solvent.upper())
+                        has_ligand_dev = (actual_ligand.upper() != expected_ligand.upper())
+                        has_temp_dev = (actual_temp.upper() != expected_temp.upper())
+                        
+                        if has_pct_b_dev or has_solvent_dev or has_ligand_dev or has_temp_dev:
+                            st.warning(
+                                f"User deviation from method development framework for Run {run_idx + 1}. Actual conditions are:\n"
+                                f"- %B: {actual_pct_b}% (Expected: {expected_pct_b}%)\n"
+                                f"- Solvent: {actual_solvent} (Expected: {expected_solvent})\n"
+                                f"- Ligand: {actual_ligand} (Expected: {expected_ligand})\n"
+                                f"- Temperature: {actual_temp}°C (Expected: {expected_temp}°C)"
+                            )
+                            
+                            # Sync selectivity progression case if solvent/temp/ligand changed
+                            if has_solvent_dev or has_temp_dev or has_ligand_dev:
+                                if 'selectivity_progression' not in st.session_state:
+                                    st.session_state.selectivity_progression = 0
+                                initial_solvent = st.session_state.all_solvents[0] if st.session_state.all_solvents else actual_solvent
+                                matched_case = determine_selectivity_case(actual_solvent, actual_temp, initial_solvent)
+                                st.session_state.selectivity_progression = matched_case
+                        
+                        # Store/Correct ACTUAL conditions at index [run_idx]
+                        if run_idx < len(st.session_state.all_pct_bs):
+                            st.session_state.all_pct_bs[run_idx] = actual_pct_b
+                        else:
+                            st.session_state.all_pct_bs.append(actual_pct_b)
+                            
+                        if run_idx < len(st.session_state.all_solvents):
+                            st.session_state.all_solvents[run_idx] = actual_solvent
+                        else:
+                            st.session_state.all_solvents.append(actual_solvent)
+
+                        if run_idx < len(st.session_state.all_ligands):
+                            st.session_state.all_ligands[run_idx] = actual_ligand
+                        else:
+                            st.session_state.all_ligands.append(actual_ligand)
+                            
+                        if run_idx < len(st.session_state.all_temperatures):
+                            st.session_state.all_temperatures[run_idx] = actual_temp
+                        else:
+                            st.session_state.all_temperatures.append(actual_temp)
 
                 # Append parsed chromatogram values to session state
                 st.session_state.all_csvs.append(dataframe_added)
@@ -797,6 +1176,10 @@ def main():
                 st.session_state.processed_file_ids.add(file_id)
                 st.success(f"Successfully processed {added_file.name}!")
                 
+                # Evaluate next strategy automatically
+                if st.session_state.all_csvs:
+                    evaluate_next_run_conditions(peakspec, runspec, res_spec, bpspec)
+
             except Exception as e:
                 st.error(f"Error parsing {added_file.name}: {e}")
     # Optional View
@@ -976,53 +1359,60 @@ def main():
 
     # Persistent Decision Radio Block (outside st.button to maintain state)
     if st.session_state.get('show_decision_radio', False):
-        choice1 = st.session_state.choice1
-        choice2 = st.session_state.choice2
-        # %B = (log10(k) - intercept) / slope
-        # log(K) = (%B * slope) + intercept
-        expected_intb_logk = choice2 * st.session_state.tr_slope + st.session_state.tr_intercept
-        # K = (tR - t0)/t0
-        # tR = K*t0 + t0
-        expected_intb_tr = (10 ** expected_intb_logk) * st.session_state.tr_tzero + st.session_state.tr_tzero 
-        choice_made = st.radio(
-            f'Select whether to proceed with Intermediate %B ({choice2}%), or Minimum %B ({choice1}%):\n\n'
-            f'Expected runtime at Intermediate %B is {ceil(expected_intb_tr)} min. Expected runtime at Minimum %B: {runspec} min',
-            ['Not Selected', 'Min%B', 'Intermediate %B']
-        )
-        print(choice1)
-        print(choice2)
-        if st.button('Confirm %B Selection'):
-            selected_b = None
-            if choice_made == 'Min%B':
-                selected_b = choice1
-            elif choice_made == 'Intermediate %B':
-                selected_b = choice2
-                
-            if selected_b is not None:
-                st.session_state.all_pct_bs.append(selected_b)
-                
-                static_keys = [
-                        'all_solvents', 
-                        'all_ligands', 
-                        'all_bead_types',
-                        'all_pore_sizes', 
-                        'all_coreshells', 
-                        'all_carbon_loads',
-                        'all_column_lengths',      # Added missing key
-                        'all_internal_diameters', 
-                        'all_particle_sizes',
-                        'all_flow_rates', 
-                        'all_temperatures'
-                ]
+        choice1 = st.session_state.get('choice1', 50.0)
+        choice2 = st.session_state.get('choice2', 50.0)
+        
+        # Safely compute expected runtime for Intermediate %B
+        slope = st.session_state.get('tr_slope', 0.0)
+        intercept = st.session_state.get('tr_intercept', 0.0)
+        tzero = st.session_state.get('tr_tzero', 0.0)
+        
+        try:
+            expected_intb_logk = choice2 * slope + intercept
+            expected_intb_tr = (10 ** expected_intb_logk) * tzero + tzero
+            runtime_display = f"{ceil(expected_intb_tr)} min" if expected_intb_tr > 0 else "N/A"
+        except Exception:
+            runtime_display = "N/A"
 
-                # Propagate static chromatographic parameters to the next run
-                for key in static_keys:
-                    st.session_state[key].append(st.session_state[key][-1])
-                    st.info(
-                    f"**Next Run Strategy:** Change %B to {selected_b}%)\n\n"
+        choice_made = st.radio(
+            f"Select whether to proceed with Intermediate %B ({choice2}%), or Minimum %B ({choice1}%):\n\n"
+            f"Expected runtime at Intermediate %B: {runtime_display} | Expected runtime at Minimum %B: {runspec} min",
+            ['Not Selected', 'Min%B', 'Intermediate %B'],
+            key='decision_radio_selection'
+        )
+
+        if st.button('Confirm %B Selection'):
+            if choice_made == 'Not Selected':
+                st.warning("Please select either 'Min%B' or 'Intermediate %B' before confirming.")
+            else:
+                selected_b = choice1 if choice_made == 'Min%B' else choice2
+                
+                # --- DEFINITIVE ARRAY SYNCHRONIZATION ---
+                # Define all 12 tracked static parameters
+                all_keys = [
+                    'all_pct_bs', 'all_solvents', 'all_ligands', 'all_bead_types',
+                    'all_pore_sizes', 'all_coreshells', 'all_carbon_loads',
+                    'all_column_lengths', 'all_internal_diameters', 'all_particle_sizes',
+                    'all_flow_rates', 'all_temperatures'
+                ]
+                
+                # 1. Modify explicitly changed key (%B)
+                st.session_state.all_pct_bs.append(selected_b)
+                modified_parameters = ['all_pct_bs']
+                
+                # 2. Replicate all unmodified keys strictly ONCE
+                for key in all_keys:
+                    if key not in modified_parameters:
+                        if key in st.session_state and st.session_state[key]:
+                            st.session_state[key].append(st.session_state[key][-1])
+
+                st.info(
+                    f"**Next Run Strategy:** Change %B to {selected_b}%\n\n"
                     f"*Controlled by:* Pump | *Parameter Type*: Chemical | *Cycle:* Retention"
-                    )
+                )
                 st.success(f"Added %B condition: {selected_b}% for next run!")
+                
+                # Reset UI trigger
                 st.session_state.show_decision_radio = False
                 st.rerun()
         
@@ -1088,7 +1478,7 @@ def main():
 
         st.dataframe(
             df_history,
-            use_container_width=True,
+            width='stretch',
             hide_index=True
         )
     else:
@@ -1132,7 +1522,19 @@ def main():
             """,
             unsafe_allow_html=True
         )
-                    
+    st.text('Selectivity Plot (log10 k vs %B) is generated below if intermediate %B has been calculated.')
+    if st.session_state.get('all_csvs'):
+        fig = generate_selectivity_plot()
+        if fig is not None:
+            with st.expander("📈 Selectivity Plot (log10 k vs %B)", expanded=True):
+                st.plotly_chart(fig, use_container_width='stretch', key=f"selectivity_plot_{len(st.session_state.all_csvs)}")
+
+    if st.button('Recalculate Intermediate %B and Selectivity Plot'):
+        # Execute optimized linear fit & Hungarian assignment
+        new_int_b = safe_int_pct_b()
+        st.success(f"Recalculated Intermediate %B: {new_int_b}%")
+        print(f'I am reaching here: {new_int_b}')
+
 # ==============================================================================
 # ENTRY POINT (Allows execution via double-click or CLI)
 # ==============================================================================
