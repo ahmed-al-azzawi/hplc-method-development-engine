@@ -1104,7 +1104,7 @@ def main():
     st.set_page_config(layout='wide')
 
     
-    st.title("Ahmed's HPLC Method Development Engine in Python")
+    st.title("Ahmed's HPLC Method Development Engine")
 
     # ==============================================================================
     # USER INSTRUCTIONS (COLLAPSIBLE EXPANDER)
@@ -1112,28 +1112,45 @@ def main():
     with st.expander("📖 View Method Development Instructions & Workflow Guide", expanded=False):
         st.markdown(
             """
-            ### 1️⃣ Set Column & System Specifications
-            * Enter your column dimensions ($L$, $d_c$), particle size ($d_p$), and dwell volume ($V_d$) in the form below.
-            * Click **Submit Specifications** to save system dead time ($t_0$) and baseline parameters before uploading runs.
-
+            Watch the video tutorial for a step-by-step walkthrough of how to use this app.
+            https://www.youtube.com/watch?v=example_video_link
+            ### 1️⃣ Set System Specifications
+            * Enter the specifications for your run, including backpressure, runtime, target number of peaks, and resolution requirements.
+            * Click the "Submit specifications" button to save your settings before uploading any runs.
             ---
 
             ### 2️⃣ Upload Chromatographic Runs Sequentially
             * Upload your run CSV files one by one as you execute them.
-            * The engine automatically extracts run conditions (%B) and physical column specifications directly from your filenames.
-            * Continue uploading new runs to iteratively feed the peak-tracking models.
+            * The engine automatically extracts run conditions and physical column specifications directly from your filenames.
+            * Your first run will be required to establish the initial conditions for the process. 
+            * It will automatically be read from the filename if it follows the naming convention, or you can manually input the conditions.
+            * If you would like to manually input the conditions, go to the top of the page and input the conditions in the "Method Specifications" section.
+            * Then, submit the conditions with the 'Submit first run conditions' button before uploading your first run.
+            * Do NOT submit first run conditions after uploading your first run, as this will overwrite the extracted conditions from the filename.
+            * Upload one run at a time, and the engine will advise the conditions for the next run based on the results of the previous runs.
+            * Use the (?) icon next to each input field for additional information about the parameter.
 
             ---
 
-            ### 3️⃣ Automated Peak Tracking & Optimization
-            * **Hungarian Assignment:** The algorithm resolves peak crossover errors across runs using bipartite matching to maximize overall model $R^2$.
-            * **Bounded %B Search:** Optimal intermediate %B is calculated strictly within the local $[M \times 10, (M+1) \times 10]$ %B window of your latest 10% screening milestones to prevent model divergence.
-
+            ### 3️⃣ Automated Conditions
+            * Minimum %B is calculated using linear regression of $\log_{10}(k)$ vs. %B. of the last peak in your run.
+            * You can choose to adjust the minimimum %B based on the temperature of the next run, which will be used to modify the selectivity of your method.
+            * Minimum %B is calculated only for the first solvent. An isoeluotropic concentration will be recommended if the solvent changes.
+            * Intermediate %B is calculated by linear regression of $\log_{10}(k)$ vs. %B for all peaks in your run.
+            * Initially, Intermediate %B builds a rough model of each compound using elution order. Using Hungarian algorithm, peaks are assigned accordingly.
+            * Due to divergence and high-%B runs having few peaks, the model restricts the calculation to the likely %B ranges that will have an ideal, missed %B.
+            * Scroll down to view the Intermediate %B and Selectivity Plot.
             ---
 
             ### 4️⃣ Review Plot & Strategy Selection
             * **Selectivity Plot:** Inspect $\log_{10}(k)$ vs. %B linear regression curves (legend displays $R^2$ to 6 decimal places).
-            * **Radio Decision Options:** Where multiple valid run paths exist, select your target condition using the provided radio buttons.
+            * **Radio Decision Options:** Where multiple valid run paths exist, select your target condition using the provided radio buttons or a segmented control.
+            ---
+            
+            ### 5️⃣ Equipment Interactive Viewer
+            * Explore the HPLC system using the interactive equipment viewer.
+            * The left column provides navigation for hardware modules and chromatographic parameters, while the right column displays detailed monographs with images and descriptions.
+            * Every run tells you which module is controlling the parameter, and how it is controlled (chemical, mechanical, or both).
             """
         )
         st.info(
