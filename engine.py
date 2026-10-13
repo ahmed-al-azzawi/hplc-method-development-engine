@@ -20,6 +20,115 @@ st.session_state.tr_slope = 0
 st.session_state.tr_intercept = 0
 st.session_state.tr_tzero = 0
 
+def extract_measured_temp(df: pd.DataFrame) -> float:
+    """
+    Searches column 0 for 'oven temp', moves 9 rows down and 1 column right,
+    and returns the measured temperature as a float.
+    """
+    try:
+        # Search for 'oven temp' in the dataframe (case-insensitive)
+        for r_idx in range(len(df)):
+            cell_val = str(df.iloc[r_idx, 0]).lower()
+            if 'oven temp' in cell_val:
+                # Target: 9 rows down, 1 column to the right
+                target_row = r_idx + 9
+                target_col = 1
+                
+                if target_row < len(df) and target_col < len(df.columns):
+                    val = df.iloc[target_row, target_col]
+                    measured_temp = float(val)
+                    return measured_temp
+    except Exception as e:
+        print(f"[DEBUG extract_measured_temp] Could not parse oven temp: {e}")
+    
+    # Fallback default if not found
+    return 25.0
+
+def calculate_temp_adjusted_minb(predicted_min_b: float, measured_temp: float, new_temp: float = 40.0) -> float:
+    """
+    Calculates a conservative temperature-adjusted min %B using:
+    tR(new) = tR(old) * (1 - 0.01 * delta_T)
+    Applies math.ceil() to the output to prevent runtime overshoot.
+    """
+    delta_t = new_temp - measured_temp
+    if delta_t <= 0:
+        return float(ceil(predicted_min_b))
+    
+    # Conservative factor f = 0.01 per degree C
+    f = 0.01
+    retention_scale_factor = 1.0 - (f * delta_t)
+    
+    # Temperature reduces retention, enabling a lower %B requirement for equal elution speed
+    # Scaling factor applied to predicted %B threshold
+    adjusted_b = predicted_min_b * retention_scale_factor
+    
+    # Conservative ceiling to guarantee zero runtime overshoot
+    return float(ceil(adjusted_b))
+
+def normalize_temp_value(temp_input) -> float:
+    """
+    Strips non-numeric characters ('T', '°C', spaces) using built-in string filtering.
+    Converts 'T40', '40°C', or ' 40.0 ' to a float float(40.0).
+    """
+    if temp_input is None:
+        return 0.0
+
+    raw_str = str(temp_input)
+    
+    # Keep only digits and decimal point
+    cleaned_str = "".join(char for char in raw_str if char.isdigit() or char == ".")
+    
+    try:
+        return float(cleaned_str)
+    except ValueError:
+        return 0.0
+
+def render_min_b_decision_ui(predicted_min_b: float, measured_temp: float, target_temp: float = 40.0) -> float:
+    """
+    Renders single-selection pills comparing standard predicted Min %B vs. temperature-adjusted Min %B.
+    Uses column t0 from session state for accurate runtime estimates.
+    """
+    st.subheader(f"Temperature-Adjusted %B Strategy ({target_temp:.0f} °C)")
+    
+    adj_min_b = calculate_temp_adjusted_minb(predicted_min_b, measured_temp, new_temp=target_temp)
+    
+    # Extract actual t0 from session state if available, else default to 1.2 min
+    t0 = st.session_state.get('all_retention_times', [[1.2]])[0][0] if st.session_state.get('all_retention_times') else 1.2
+    
+    # Chromatographically realistic runtime estimations
+    est_runtime_std = round(t0 * (1.0 + (100.0 / max(predicted_min_b, 10.0))), 1)
+    scale_factor = 0.85 if target_temp == 40.0 else 0.70
+    est_runtime_adj = round(t0 * (1.0 + (100.0 / max(adj_min_b, 10.0))) * scale_factor, 1)
+
+    opt_std_label = f"Continue with predicted Min %B: {predicted_min_b:.1f}% (Est. Runtime: ~{est_runtime_std} min)"
+    opt_adj_label = f"Use temperature-adjusted Min %B: {adj_min_b:.1f}% (Est. Runtime: ~{est_runtime_adj} min)"
+
+    options_map = {
+        opt_std_label: float(predicted_min_b),
+        opt_adj_label: float(adj_min_b)
+    }
+
+    pills_key = f"temp_opt_pills_{st.session_state.get('selectivity_progression', 0)}"
+
+    # Default to adjusted option if not previously selected
+    if pills_key not in st.session_state:
+        st.session_state[pills_key] = opt_adj_label
+
+    selected_label = st.pills(
+        "Select target mobile phase composition for elevated temperature run:",
+        options=list(options_map.keys()),
+        selection_mode="single",
+        key=pills_key
+    )
+
+    # Fallback to standard option if unselected
+    if not selected_label:
+        selected_label = opt_std_label
+
+    chosen_b = options_map[selected_label]
+    st.session_state.selected_min_b = chosen_b
+    return chosen_b
+
 def safe_min_b(tr):
     try:
         return min_b(tr)
@@ -52,15 +161,16 @@ def evaluate_next_run_conditions(peakspec, runspec, res_spec, bpspec):
     latest_peaks = st.session_state.all_peak_counts[-1]
     latest_runtime = st.session_state.all_run_times[-1]
     latest_resolution = st.session_state.all_resolutions_final[-1]
+    latest_equilibration = st.session_state.all_equilibrated[-1]
     run_count = len(st.session_state.all_backpressures)
-    
     static_keys = [
         'all_solvents', 'all_ligands', 'all_bead_types',
         'all_pore_sizes', 'all_coreshells', 'all_carbon_loads',
         'all_column_lengths', 'all_internal_diameters', 
         'all_particle_sizes', 'all_flow_rates', 'all_temperatures'
     ]
-
+    if latest_equilibration:
+        st.success('Backpressure is stable, column is equilibrated well.')
     # 1. Backpressure Check
     if latest_bp > bpspec:
         st.caption(f"📊 **Run Metrics:** Backpressure ({latest_bp:.1f} bar) > Spec ({bpspec:.1f} bar) | Peaks: {latest_peaks}/{peakspec}")
@@ -124,7 +234,6 @@ def evaluate_next_run_conditions(peakspec, runspec, res_spec, bpspec):
             else:
                 st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) << Spec ({runspec} min) | $R_s$ ({latest_resolution:.2f}) < Spec ({res_spec})")
                 st.info("**Next Run Strategy:** Increase Column Length ($L$) (watch BP) OR decrease Flow Rate ($F$) OR decrease Particle Size ($dp$) (watch BP) OR switch to Core-Shell (SPP).\n\n*Controlled by:* Column / Pump | *Cycle:* Efficiency (N)")
-
         elif tR_below:
             if pass_resolution:
                 st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) < Spec ({runspec} min) | $R_s$ ({latest_resolution:.2f}) >= Spec ({res_spec})")
@@ -132,7 +241,6 @@ def evaluate_next_run_conditions(peakspec, runspec, res_spec, bpspec):
             else:
                 st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) < Spec ({runspec} min) | $R_s$ ({latest_resolution:.2f}) < Spec ({res_spec})")
                 st.info("**Next Run Strategy:** Decrease Flow Rate ($F$) OR decrease Particle Size ($dp$) (watch BP) OR switch to Core-Shell (SPP).\n\n*Controlled by:* Pump / Column | *Cycle:* Efficiency (N)")
-
         elif tR_above:
             if pass_resolution:
                 st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) > Spec ({runspec} min) | $R_s$ ({latest_resolution:.2f}) >= Spec ({res_spec})")
@@ -140,7 +248,6 @@ def evaluate_next_run_conditions(peakspec, runspec, res_spec, bpspec):
             else:
                 st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) > Spec ({runspec} min) | $R_s$ ({latest_resolution:.2f}) < Spec ({res_spec})")
                 st.info("**Next Run Strategy:** Decrease Particle Size ($dp$) (watch BP), then increase Flow Rate ($F$) to shorten the run time.\n\n*Controlled by:* Column / Pump | *Cycle:* Efficiency (N)")
-
         st.session_state.all_pct_bs.append(st.session_state.all_pct_bs[-1])
         for key in static_keys:
             st.session_state[key].append(st.session_state[key][-1])
@@ -480,11 +587,6 @@ def min_b(tr):
     return float(ceil(min_pct_b))
 
 
-from scipy.optimize import linear_sum_assignment
-from scipy.stats import linregress
-import numpy as np
-from math import ceil
-import streamlit as st
 
 def int_pct_b():
     """
@@ -663,13 +765,24 @@ def int_pct_b():
     return float(round(ideal_pct_b, 1))
 
 
-def handle_selectivity(prev_b=False):
+def handle_selectivity(df=None, prev_b=False):
     # 1. Initialize counter
     if 'selectivity_progression' not in st.session_state:
         st.session_state.selectivity_progression = 0
     
     st.session_state.selectivity_progression += 1
     
+    # Initialize measured temperatures tracking array
+    if 'all_measured_temps' not in st.session_state:
+        st.session_state.all_measured_temps = []
+
+    # Parse and store measured temperature from DataFrame if supplied
+    if df is not None:
+        measured_temp = extract_measured_temp(df)
+        st.session_state.all_measured_temps.append(measured_temp)
+    else:
+        measured_temp = st.session_state.all_measured_temps[-1] if st.session_state.all_measured_temps else 25.0
+
     modified_parameters = []
     static_keys = [
         'all_solvents', 
@@ -687,14 +800,27 @@ def handle_selectivity(prev_b=False):
     ]
     
     # Under some circumstances switch to previous %B and continue changing selectivity
-    if prev_b:
+    if prev_b and len(st.session_state.all_pct_bs) >= 2:
         modified_parameters.append('all_pct_bs')
         st.session_state.all_pct_bs.append(st.session_state.all_pct_bs[-2])
         
+    current_predicted_b = st.session_state.all_pct_bs[-1] if st.session_state.all_pct_bs else 50.0
+    
+    # Check current active solvent (e.g., 'meoh', 'me', 'methanol')
+    current_solvent = str(st.session_state.all_solvents[-1]).strip().lower() if st.session_state.get('all_solvents') else 'acn'
+    is_meoh = any(token in current_solvent for token in ['meoh', 'methanol', 'me'])
+
     match st.session_state.selectivity_progression:
         case 1:
             st.session_state.all_temperatures.append('40')
             modified_parameters.append('all_temperatures')
+            
+            # ONLY trigger temperature-adjusted Min %B UI if solvent is NOT MeOH / Me
+            if not is_meoh:
+                chosen_b = render_min_b_decision_ui(current_predicted_b, measured_temp, target_temp=40.0)
+                if chosen_b != current_predicted_b:
+                    st.session_state.all_pct_bs[-1] = chosen_b
+
             st.info(
                 "**Next Run Strategy:** Increase Temperature to 40 °C to modify band spacing (selectivity) and reduce mobile phase viscosity. Shortens runtime and may reduce peak width. \n\n"
                 "*Controlled by:* Column Oven | *Category:* Both (Chemical & Mechanical) | *Cycle:* Selectivity"
@@ -703,6 +829,13 @@ def handle_selectivity(prev_b=False):
         case 2:
             st.session_state.all_temperatures.append('60')
             modified_parameters.append('all_temperatures')
+            
+            # ONLY trigger temperature-adjusted Min %B UI if solvent is NOT MeOH / Me
+            if not is_meoh:
+                chosen_b = render_min_b_decision_ui(current_predicted_b, measured_temp, target_temp=60.0)
+                if chosen_b != current_predicted_b:
+                    st.session_state.all_pct_bs[-1] = chosen_b
+
             st.info(
                 "**Next Run Strategy:** Increase Temperature to 60 °C to further adjust selectivity and sharpen peak shapes. Further shortens runtime and may reduce peak width. \n\n"
                 "*Controlled by:* Column Oven | *Category:* Both (Chemical & Mechanical) | *Cycle:* Selectivity"
@@ -710,22 +843,18 @@ def handle_selectivity(prev_b=False):
             
         case 3:
             st.session_state.all_temperatures.append('amb')
-            current_solvent = st.session_state.all_solvents[-1].strip().lower()
             current_pct_b = st.session_state.all_pct_bs[-1]
             
-            if current_solvent in ['acn', 'acetonitrile']:
-                new_solvent = 'MeOH'
-                nomogram_slope = 1.0090909
-                nomogram_int = 6.9264069
-                converted_b = current_pct_b * nomogram_slope + nomogram_int
-            elif current_solvent in ['meoh', 'methanol']:
+            if is_meoh:
                 new_solvent = 'ACN'
                 nomogram_slope = 0.980221359
                 nomogram_int = -6.246035141
                 converted_b = current_pct_b * nomogram_slope + nomogram_int
             else:
-                new_solvent = st.session_state.all_solvents[-1]
-                converted_b = current_pct_b
+                new_solvent = 'MeOH'
+                nomogram_slope = 1.0090909
+                nomogram_int = 6.9264069
+                converted_b = current_pct_b * nomogram_slope + nomogram_int
 
             st.session_state.all_solvents.append(new_solvent)
             st.session_state.all_pct_bs.append(round(converted_b, 1))
@@ -734,20 +863,33 @@ def handle_selectivity(prev_b=False):
             
             st.info(
                 f"**Next Run Strategy:** Swap Organic Solvent to {new_solvent} at nomogram-converted ratio ({round(converted_b, 1)}% B) at ambient temperature to alter solute-solvent solvophobic interactions like acidity, basicity and dipolarity at the same strength.\n\n"
-                f"*Controlled by:* Pump / Solvent Manager | *Category:* Chemical | *Cycle:* Selectivity"
+                f"*Controlled by:* Pump / Solvents | *Category:* Chemical | *Cycle:* Selectivity"
             )
             
         case 4:
             st.session_state.all_temperatures.append('40')
             modified_parameters.append('all_temperatures')
+            
+            # ONLY trigger temperature-adjusted Min %B UI if solvent is NOT MeOH / Me
+            if not is_meoh:
+                chosen_b = render_min_b_decision_ui(current_predicted_b, measured_temp, target_temp=40.0)
+                if chosen_b != current_predicted_b:
+                    st.session_state.all_pct_bs[-1] = chosen_b
+
             st.info(
                 "**Next Run Strategy:** Increase Temperature to 40 °C to modify band spacing (selectivity) and reduce mobile phase viscosity. Shortens runtime and may reduce peak width. \n\n"
                 "*Controlled by:* Column Oven | *Category:* Both (Chemical & Mechanical) | *Cycle:* Selectivity"
             )
-            
         case 5:
             st.session_state.all_temperatures.append('60')
             modified_parameters.append('all_temperatures')
+            
+            # ONLY trigger temperature-adjusted Min %B UI if solvent is NOT MeOH / Me
+            if not is_meoh:
+                chosen_b = render_min_b_decision_ui(current_predicted_b, measured_temp, target_temp=60.0)
+                if chosen_b != current_predicted_b:
+                    st.session_state.all_pct_bs[-1] = chosen_b
+
             st.info(
                 "**Next Run Strategy:** Increase Temperature to 60 °C to further adjust selectivity and sharpen peak shapes. Further shortens runtime and may reduce peak width. \n\n"
                 "*Controlled by:* Column Oven | *Category:* Both (Chemical & Mechanical) | *Cycle:* Selectivity"
@@ -760,7 +902,8 @@ def handle_selectivity(prev_b=False):
                 'all_backpressures', 'all_pct_bs', 'all_solvents', 'all_ligands',
                 'all_bead_types', 'all_pore_sizes', 'all_coreshells', 'all_carbon_loads',
                 'all_column_lengths', 'all_internal_diameters', 'all_particle_sizes',
-                'all_flow_rates', 'all_temperatures', 'all_sample_concentrations'
+                'all_flow_rates', 'all_temperatures', 'all_sample_concentrations',
+                'all_measured_temps'
             ]
             
             last_ligand = st.session_state.all_ligands[-1] if st.session_state.get('all_ligands') else "current"
@@ -784,15 +927,221 @@ def handle_selectivity(prev_b=False):
         if key in st.session_state and st.session_state[key]:
             st.session_state[key].append(st.session_state[key][-1])
 
+def equipment_interactive():
+    """
+    Standalone interactive HPLC equipment & parameter monograph viewer.
+    Features dual-column navigation for modules vs. parameters and updated 
+    chromatogram parameter linkages.
+    """
+    # --------------------------------------------------------------------------
+    # 1. AUTO-SCROLL EXECUTION
+    # --------------------------------------------------------------------------
+    st.markdown('<div id="equipment-viewer-anchor"></div>', unsafe_allow_html=True)
+
+    if st.session_state.get('scroll_to_equipment', False):
+        st.session_state.scroll_to_equipment = False
+        st.components.v1.html(
+            """
+            <script>
+                function scrollToEquipment() {
+                    try {
+                        var target = window.parent.document.getElementById('equipment-viewer-anchor');
+                        if (target) {
+                            target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                        }
+                    } catch (e) {
+                        window.location.hash = 'equipment-viewer-anchor';
+                    }
+                }
+                setTimeout(scrollToEquipment, 150);
+            </script>
+            """,
+            height=0,
+        )
+
+    # --------------------------------------------------------------------------
+    # 2. DEFINITIONS & DICTIONARIES
+    # --------------------------------------------------------------------------
+    MODULE_KEYS = {"solvents", "degasser", "pump", "injector", "column", "column_oven", "detector"}
+    PARAMETER_KEYS = {"selectivity", "retention", "efficiency", "backpressure", "area_under_peak", "peak_height", "peak_width", "runtime"}
+
+    LABEL_MAP = {
+        "Instruments": "Instruments Overview",
+        "solvents": "Solvents",
+        "degasser": "Degasser",
+        "pump": "Pump",
+        "injector": "Injector",
+        "column": "Column",
+        "column_oven": "Column Oven",
+        "detector": "Detector",
+        "selectivity": "Selectivity",
+        "retention": "Retention Time",
+        "efficiency": "Efficiency (N)",
+        "backpressure": "Backpressure",
+        "area_under_peak": "Area Under Peak",
+        "peak_height": "Peak Height",
+        "peak_width": "Peak Width",
+        "runtime": "Runtime",
+        "parameters_read": "Parameters Read from Chromatogram"
+    }
+
+    REVERSE_LABEL_MAP = {v: k for k, v in LABEL_MAP.items()}
+
+    NAVIGATION_LINKS = {
+        "Instruments": [
+            "solvents", "degasser", "pump", "injector", 
+            "column", "column_oven", "detector", "parameters_read"
+        ],
+        "solvents": ["selectivity", "retention", "Instruments", "parameters_read"],
+        "degasser": ["Instruments", "parameters_read"],
+        "pump": ["retention", "efficiency", "backpressure", "Instruments", "parameters_read"],
+        "injector": ["area_under_peak", "Instruments", "parameters_read"],
+        "column": ["efficiency", "backpressure", "selectivity", "runtime", "Instruments", "parameters_read"],
+        "column_oven": ["runtime", "backpressure", "selectivity", "retention", "Instruments", "parameters_read"],
+        "detector": ["area_under_peak", "Instruments", "parameters_read"],
+        # Parameters
+        "selectivity": ["solvents", "column", "column_oven", "Instruments", "parameters_read"],
+        "retention": ["solvents", "pump", "column_oven", "Instruments", "parameters_read"],
+        "efficiency": ["pump", "column", "Instruments", "parameters_read"],
+        "backpressure": ["pump", "column", "column_oven", "Instruments", "parameters_read"],
+        "area_under_peak": ["injector", "detector", "Instruments", "parameters_read"],
+        "peak_height": ["Instruments", "parameters_read"],
+        "peak_width": ["Instruments", "parameters_read"],
+        "runtime": ["column", "column_oven", "Instruments", "parameters_read"],
+        # Chromatogram Parameters Read
+        "parameters_read": [
+            "peak_height", "area_under_peak", "efficiency", 
+            "peak_width", "backpressure", "runtime", "Instruments"
+        ]
+    }
+
+    if "active_equipment_node" not in st.session_state:
+        st.session_state.active_equipment_node = "Instruments"
+
+    current_node = st.session_state.active_equipment_node
+
+    with st.container():
+        valid_targets = NAVIGATION_LINKS.get(current_node, ["Instruments"])
+        top_system_keys = ["Instruments", "parameters_read"]
+
+        # Top System Overview Control
+        top_keys = [k for k in top_system_keys if k in valid_targets or k == current_node]
+        if current_node == "Instruments" and "Instruments" in top_keys:
+            top_keys.remove("Instruments")
+            
+        top_labels = [LABEL_MAP.get(k, k) for k in top_keys]
+        current_label = LABEL_MAP.get(current_node, current_node)
+
+        if top_labels:
+            selected_top = st.segmented_control(
+                "System Overview Views:",
+                options=top_labels,
+                default=current_label if current_label in top_labels else None,
+                selection_mode="single",
+                key=f"seg_ctrl_top_{current_node}"
+            )
+            if selected_top and selected_top != current_label:
+                st.session_state.active_equipment_node = REVERSE_LABEL_MAP.get(selected_top, "Instruments")
+                st.rerun()
+
+        st.markdown("---")
+
+        # Two-Section Layout: Side Navigation (Left) + Monograph Display (Right)
+        col_nav, col_display = st.columns([2, 3], gap="medium")
+
+        with col_nav:
+            # Separate available targets into Modules vs Parameters
+            bottom_keys = [k for k in valid_targets if k not in top_system_keys]
+            
+            nav_modules = [k for k in bottom_keys if k in MODULE_KEYS]
+            nav_parameters = [k for k in bottom_keys if k in PARAMETER_KEYS]
+
+            # Split Navigation into two side-by-side sub-columns
+            subcol_modules, subcol_params = st.columns(2, gap="small")
+
+            with subcol_modules:
+                st.caption("Hardware Modules")
+                if nav_modules:
+                    for key in nav_modules:
+                        label = LABEL_MAP.get(key, key)
+                        is_active = (key == current_node)
+                        btn_type = "primary" if is_active else "secondary"
+                        if st.button(label, key=f"v_nav_m_{key}", use_container_width=True, type=btn_type):
+                            st.session_state.active_equipment_node = key
+                            st.rerun()
+                else:
+                    st.write("—")
+
+            with subcol_params:
+                st.caption("Parameters")
+                if nav_parameters:
+                    for key in nav_parameters:
+                        label = LABEL_MAP.get(key, key)
+                        is_active = (key == current_node)
+                        btn_type = "primary" if is_active else "secondary"
+                        if st.button(label, key=f"v_nav_p_{key}", use_container_width=True, type=btn_type):
+                            st.session_state.active_equipment_node = key
+                            st.rerun()
+                else:
+                    st.write("—")
+
+        with col_display:
+            if current_node == "Instruments":
+                st.subheader("HPLC System Instrumentation Overview")
+                st.image("assets/manual_injector.png")
+                st.image("assets/uhplc.png")
+                st.image("assets/autosampler.png")
+            else:
+                node_title = LABEL_MAP.get(current_node, current_node)
+                st.subheader(f"Monograph: {node_title}")
+                st.image(f"assets/{current_node}.png")
+
+
 def main():
     # --------------------------------------------------------------------------
     # Page Configuration & Header
     # --------------------------------------------------------------------------
     st.set_page_config(layout='wide')
+
     
     st.title("Ahmed's HPLC Method Development Engine in Python")
-    st.text('Edit the specifications and run conditions to match your method. An example is provided. Hover over the (?) icon for information. Make sure to submit your changes.')
-    st.text('Additionally, you may automatically input the CSV of your first run to fill out the run conditions automatically.')
+
+    # ==============================================================================
+    # USER INSTRUCTIONS (COLLAPSIBLE EXPANDER)
+    # ==============================================================================
+    with st.expander("📖 View Method Development Instructions & Workflow Guide", expanded=False):
+        st.markdown(
+            """
+            ### 1️⃣ Set Column & System Specifications
+            * Enter your column dimensions ($L$, $d_c$), particle size ($d_p$), and dwell volume ($V_d$) in the form below.
+            * Click **Submit Specifications** to save system dead time ($t_0$) and baseline parameters before uploading runs.
+
+            ---
+
+            ### 2️⃣ Upload Chromatographic Runs Sequentially
+            * Upload your run CSV files one by one as you execute them.
+            * The engine automatically extracts run conditions (%B) and physical column specifications directly from your filenames.
+            * Continue uploading new runs to iteratively feed the peak-tracking models.
+
+            ---
+
+            ### 3️⃣ Automated Peak Tracking & Optimization
+            * **Hungarian Assignment:** The algorithm resolves peak crossover errors across runs using bipartite matching to maximize overall model $R^2$.
+            * **Bounded %B Search:** Optimal intermediate %B is calculated strictly within the local $[M \times 10, (M+1) \times 10]$ %B window of your latest 10% screening milestones to prevent model divergence.
+
+            ---
+
+            ### 4️⃣ Review Plot & Strategy Selection
+            * **Selectivity Plot:** Inspect $\log_{10}(k)$ vs. %B linear regression curves (legend displays $R^2$ to 6 decimal places).
+            * **Radio Decision Options:** Where multiple valid run paths exist, select your target condition using the provided radio buttons.
+            """
+        )
+        st.info(
+            "💡 **Best Practice:** Execute initial screening runs at clean 10% organic solvent increments "
+            "(e.g., 30%, 40%, 50%) for optimal linear fit accuracy."
+        )
+        st.text('Edit the specifications and run conditions to match your method. An example is provided. Hover over the (?) icon for information. Make sure to submit your changes.')
+        st.text('Additionally, you may automatically input the CSV of your first run to fill out the run conditions automatically.')
     print('''chromatogram_file = st.file_uploader("Upload Chromatogram CSV", type=["csv"])
 
     if chromatogram_file is not None:
@@ -1017,7 +1366,7 @@ def main():
             st.session_state[key] = []
     
     # Adding the first run values
-    if st.button('Submit first run conditions (manual mode, if your file naming is not understood)'):
+    if st.button('Submit first run conditions (manual mode, if your file naming fails to be parsed)'):
         st.session_state.all_pct_bs.append(percent_bf)
         st.session_state.all_solvents.append(solventf)
         st.session_state.all_ligands.append(ligandf)
@@ -1030,7 +1379,12 @@ def main():
         st.session_state.all_particle_sizes.append(particle_sizef)
         st.session_state.all_flow_rates.append(flow_ratef)
         st.session_state.all_temperatures.append(tempf)
-    
+
+    if st.button('Submit specifications.'):
+        st.session_state.peakspec = peakspec
+        st.session_state.runspec = runspec
+        st.session_state.res_spec = res_spec
+        st.session_state.bpspec = bpspec
     # Tracker set to prevent re-parsing on every Streamlit page re-render
     if 'processed_file_ids' not in st.session_state:
         st.session_state.processed_file_ids = set()
@@ -1117,6 +1471,10 @@ def main():
                         expected_solvent = str(st.session_state.all_solvents[run_idx]).strip() if run_idx < len(st.session_state.all_solvents) else actual_solvent
                         expected_ligand = str(st.session_state.all_ligands[run_idx]).strip() if run_idx < len(st.session_state.all_ligands) else actual_ligand
                         expected_temp = str(st.session_state.all_temperatures[run_idx]).strip() if run_idx < len(st.session_state.all_temperatures) else actual_temp
+                        actual_temp_num = normalize_temp_value(actual_temp)
+                        expected_temp_num = normalize_temp_value(expected_temp)
+
+                        has_temp_dev = abs(actual_temp_num - expected_temp_num) > 0.5
                         
                         # Check for deviations against expectations
                         has_pct_b_dev = (actual_pct_b != expected_pct_b)
@@ -1211,7 +1569,7 @@ def main():
             })
     
     # Processing of decisions
-    if st.button('Click to acquire conditions of next run, according to this run.'):
+    if st.button('Request decision again, if not acquired after uploading.'):
         # Guard check: Ensure at least one run has been uploaded and parsed
         if not st.session_state.all_backpressures:
             st.error("No run data found. Please upload a CSV run file first.")
@@ -1484,44 +1842,11 @@ def main():
     else:
         st.caption("No historical run records available yet. Upload a CSV chromatogram run to populate the record.")
 
-    st.header('Equipment Interactive: Use embedded sheet below. Collapsed by default.')
-    st.caption('URL to interactive, in case of embedding failure: https://docs.google.com/spreadsheets/d/1-Kl4UFp9Kk7IYOftbTtGVi-bior72YgTK0jYJZEbVK8/edit?usp=sharing')
+   
     google_sheet_url = "https://docs.google.com/spreadsheets/d/1-Kl4UFp9Kk7IYOftbTtGVi-bior72YgTK0jYJZEbVK8/edit?gid=268052302#gid=268052302"
 
-    with st.expander("📊 View Live Sheet Interactive", expanded=False):
-        st.markdown(
-            f"""
-            <div style="
-                position: relative;
-                width: 100%;
-                height: 600px;
-                overflow: hidden;
-                overscroll-behavior: contain;
-                border: none;
-                outline: none;
-                margin: 0;
-                padding: 0;
-            ">
-                <iframe 
-                    src="{google_sheet_url}" 
-                    loading="lazy"
-                    tabindex="-1"
-                    style="
-                        position: absolute;
-                        top: -120px;
-                        left: 0;
-                        width: 100%;
-                        height: calc(100% + 120px);
-                        border: none;
-                        outline: none;
-                    " 
-                    frameborder="0"
-                    scrolling="auto">
-                </iframe>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
+    
+    st.header('log(K) vs %B for all peaks')
     st.text('Selectivity Plot (log10 k vs %B) is generated below if intermediate %B has been calculated.')
     if st.session_state.get('all_csvs'):
         fig = generate_selectivity_plot()
@@ -1534,6 +1859,10 @@ def main():
         new_int_b = safe_int_pct_b()
         st.success(f"Recalculated Intermediate %B: {new_int_b}%")
         print(f'I am reaching here: {new_int_b}')
+    st.header('Equipment Interactive: HPLC')
+    #st.markdown('<div id="equipment-viewer"></div>', unsafe_allow_html=True)
+    equipment_interactive()
+    st.caption(f'Want to view original source for equipment interactive?: {google_sheet_url}')
 
 # ==============================================================================
 # ENTRY POINT (Allows execution via double-click or CLI)
