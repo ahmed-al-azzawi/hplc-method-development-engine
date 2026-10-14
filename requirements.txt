@@ -3,3 +3,4 @@ pandas
 chardet
 numpy
 scipy
+plotly
