@@ -44,6 +44,12 @@ from plotly import graph_objects as go
 import random
 from scipy.optimize import linear_sum_assignment
 
+st.set_page_config(
+    page_title="HPLC Method Development App",
+    page_icon="🧪",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 st.session_state.pending_ligand_change = False
 st.session_state.tr_slope = 0
 st.session_state.tr_intercept = 0
@@ -621,8 +627,8 @@ def int_pct_b():
     """
     Calculates the optimal Intermediate %B by fitting linear log10(k) vs %B models,
     refining peak alignment via Hungarian optimization to eliminate crossover errors,
-    and maximizing worst-case peak separation strictly within the local window of 
-    the last two screening runs that are multiples of 10 (e.g., 40% to 50%).
+    and maximizing worst-case peak separation strictly WITHIN the interior local window 
+    of the last two screening runs (excluding boundary endpoints like 40% or 50%).
     """
     ret_times = list(st.session_state.get('all_retention_times', []))
     pct_bs = list(st.session_state.get('all_pct_bs', []))
@@ -739,7 +745,7 @@ def int_pct_b():
         return float(ceil(pct_bs[-1]))
         
     # --------------------------------------------------------------------------
-    # STEP 4: SEPARATION OPTIMIZATION STRICTLY WITHIN LAST TWO MULTIPLE-OF-10 RUNS
+    # STEP 4: SEPARATION OPTIMIZATION STRICTLY WITHIN INTERMEDIATE WINDOW
     # --------------------------------------------------------------------------
     # Filter for unique %B values that are multiples of 10 (e.g. 30, 40, 50)
     multiple_of_10_bs = []
@@ -764,7 +770,12 @@ def int_pct_b():
     if b_min >= b_max:
         return float(ceil(pct_bs[-1]))
 
-    speculative_bs = np.arange(b_min, b_max + step, step)
+    # EXCLUDE ENDPOINTS (b_min and b_max) -> Strict interior search
+    speculative_bs = np.arange(b_min + step, b_max, step)
+
+    # Fallback safety if window is too narrow
+    if len(speculative_bs) == 0:
+        return float(round((b_min + b_max) / 2.0, 1))
 
     slopes_arr = np.array([c[0] for c in optimised_curves])[:, np.newaxis]
     intercepts_arr = np.array([c[1] for c in optimised_curves])[:, np.newaxis]
@@ -782,14 +793,14 @@ def int_pct_b():
     # Extract off-diagonal peak pairs -> Shape: (N*(N-1), N_speculative_steps)
     off_diag_diffs = pairwise_diffs[diag_mask, :]
 
-    # Minimum peak separation for each speculative %B step inside the window
+    # Minimum peak separation for each speculative %B step inside the interior window
     min_separations = off_diag_diffs.min(axis=0)
 
-    # Select %B index that maximizes worst-case separation within local bounds
+    # Select interior %B index that maximizes worst-case separation
     best_idx = int(np.argmax(min_separations))
     ideal_pct_b = float(speculative_bs[best_idx])
 
-    print(f"[DEBUG int_pct_b] Multiples-of-10 Window: [{b_min}%, {b_max}%]. Optimal %B found: {ideal_pct_b}%")
+    print(f"[DEBUG int_pct_b] Interior Window: ({b_min}%, {b_max}%). Optimal Intermediate %B found: {ideal_pct_b}%")
 
     return float(round(ideal_pct_b, 1))
 
@@ -959,8 +970,8 @@ def handle_selectivity(df=None, prev_b=False):
 def equipment_interactive():
     """
     Standalone interactive HPLC equipment & parameter monograph viewer.
-    Features dual-column navigation for modules vs. parameters and updated 
-    chromatogram parameter linkages.
+    Features dual-column navigation for modules vs. parameters, segmented top overview,
+    and side-by-side display for calculated vs. read chromatogram parameters.
     """
 
     # --------------------------------------------------------------------------
@@ -986,8 +997,9 @@ def equipment_interactive():
         "peak_height": "Peak Height",
         "peak_width": "Peak Width",
         "runtime": "Runtime",
-        "resolution": "Resolution",
-        "parameters_read": "Parameters Read from Chromatogram"
+        "resolution": "Resolution (Rs)",
+        "parameters_read": "Parameters Read from Chromatogram",
+        "parameters_calc": "Parameters Calculated"
     }
 
     REVERSE_LABEL_MAP = {v: k for k, v in LABEL_MAP.items()}
@@ -995,28 +1007,32 @@ def equipment_interactive():
     NAVIGATION_LINKS = {
         "Instruments": [
             "solvents", "degasser", "pump", "injector", 
-            "column", "column_oven", "detector", "parameters_read"
+            "column", "column_oven", "detector", "parameters_read", "parameters_calc"
         ],
-        "solvents": ["selectivity", "retention", "Instruments", "parameters_read"],
-        "degasser": ["Instruments", "parameters_read"],
-        "pump": ["retention", "efficiency", "backpressure", "Instruments", "parameters_read"],
-        "injector": ["area_under_peak", "Instruments", "parameters_read"],
-        "column": ["efficiency", "backpressure", "selectivity", "runtime", "Instruments", "parameters_read"],
-        "column_oven": ["runtime", "backpressure", "selectivity", "retention", "Instruments", "parameters_read"],
-        "detector": ["area_under_peak", "Instruments", "parameters_read"],
+        "solvents": ["selectivity", "retention", "Instruments", "parameters_read", "parameters_calc"],
+        "degasser": ["Instruments", "parameters_read", "parameters_calc"],
+        "pump": ["retention", "efficiency", "backpressure", "Instruments", "parameters_read", "parameters_calc"],
+        "injector": ["area_under_peak", "Instruments", "parameters_read", "parameters_calc"],
+        "column": ["efficiency", "backpressure", "selectivity", "runtime", "Instruments", "parameters_read", "parameters_calc"],
+        "column_oven": ["runtime", "backpressure", "selectivity", "retention", "Instruments", "parameters_read", "parameters_calc"],
+        "detector": ["area_under_peak", "Instruments", "parameters_read", "parameters_calc"],
         # Parameters
-        "selectivity": ["solvents", "column", "column_oven", "Instruments", "parameters_read"],
-        "retention": ["solvents", "pump", "column_oven", "Instruments", "parameters_read"],
-        "efficiency": ["pump", "column", "Instruments", "parameters_read"],
-        "backpressure": ["pump", "column", "column_oven", "Instruments", "parameters_read"],
-        "area_under_peak": ["injector", "detector", "Instruments", "parameters_read"],
-        "peak_height": ["Instruments", "parameters_read"],
-        "peak_width": ["Instruments", "parameters_read"],
-        "runtime": ["column", "column_oven", "Instruments", "parameters_read"],
-        # Chromatogram Parameters Read
+        "selectivity": ["solvents", "column", "column_oven", "Instruments", "parameters_read", "parameters_calc"],
+        "retention": ["solvents", "pump", "column_oven", "Instruments", "parameters_read", "parameters_calc"],
+        "efficiency": ["pump", "column", "Instruments", "parameters_read", "parameters_calc"],
+        "backpressure": ["pump", "column", "column_oven", "Instruments", "parameters_read", "parameters_calc"],
+        "area_under_peak": ["injector", "detector", "Instruments", "parameters_read", "parameters_calc"],
+        "peak_height": ["Instruments", "parameters_read", "parameters_calc"],
+        "peak_width": ["Instruments", "parameters_read", "parameters_calc"],
+        "resolution": ["Instruments", "parameters_read", "parameters_calc"],
+        "runtime": ["column", "column_oven", "Instruments", "parameters_read", "parameters_calc"],
+        # System Overviews
         "parameters_read": [
             "peak_height", "area_under_peak", "efficiency", 
-            "peak_width", "backpressure", "runtime", "Instruments"
+            "peak_width", "resolution", "backpressure", "runtime", "Instruments", "parameters_calc"
+        ],
+        "parameters_calc": [
+            "resolution", "retention", "selectivity", "efficiency", "Instruments", "parameters_read"
         ]
     }
 
@@ -1027,7 +1043,7 @@ def equipment_interactive():
 
     with st.container():
         valid_targets = NAVIGATION_LINKS.get(current_node, ["Instruments"])
-        top_system_keys = ["Instruments", "parameters_read"]
+        top_system_keys = ["Instruments", "parameters_read", "parameters_calc"]
 
         # Top System Overview Control
         top_keys = [k for k in top_system_keys if k in valid_targets or k == current_node]
@@ -1096,6 +1112,16 @@ def equipment_interactive():
                 st.image("assets/manual_injector.png")
                 st.image("assets/uhplc.png")
                 st.image("assets/autosampler.png")
+            elif current_node == "parameters_calc":
+                st.subheader("Calculated Chromatographic Parameters")
+                # 2x2 side-by-side display grid for calculated parameters
+                grid_col1, grid_col2 = st.columns(2, gap="small")
+                with grid_col1:
+                    st.image("assets/resolution.png", caption="Resolution (Rs)")
+                    st.image("assets/selectivity.png", caption="Selectivity (α)")
+                with grid_col2:
+                    st.image("assets/retention.png", caption="Retention Factor (k)")
+                    st.image("assets/efficiency.png", caption="Efficiency / Column Plates (N)")
             else:
                 node_title = LABEL_MAP.get(current_node, current_node)
                 st.subheader(f"Monograph: {node_title}")
