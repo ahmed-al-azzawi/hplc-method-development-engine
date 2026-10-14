@@ -1017,15 +1017,14 @@ def equipment_interactive():
         "column_oven": ["runtime", "backpressure", "selectivity", "retention", "Instruments", "parameters_read", "parameters_calc"],
         "detector": ["area_under_peak", "Instruments", "parameters_read", "parameters_calc"],
         # Parameters
-        "selectivity": ["solvents", "column", "column_oven", "Instruments", "parameters_read", "parameters_calc"],
+        "selectivity": ["solvents", "pump", "column", "column_oven", "Instruments", "parameters_read", "parameters_calc"],
         "retention": ["solvents", "pump", "column_oven", "Instruments", "parameters_read", "parameters_calc"],
         "efficiency": ["pump", "column", "Instruments", "parameters_read", "parameters_calc"],
         "backpressure": ["pump", "column", "column_oven", "Instruments", "parameters_read", "parameters_calc"],
         "area_under_peak": ["injector", "detector", "Instruments", "parameters_read", "parameters_calc"],
         "peak_height": ["Instruments", "parameters_read", "parameters_calc"],
-        "peak_width": ["Instruments", "parameters_read", "parameters_calc"],
-        "resolution": ["Instruments", "parameters_read", "parameters_calc"],
-        "runtime": ["column", "column_oven", "Instruments", "parameters_read", "parameters_calc"],
+        "resolution": ["pump", "column", "column_oven", "solvents", "Instruments", "parameters_read", "parameters_calc"],
+        "runtime": ["column", "column_oven", "pump", "Instruments", "parameters_read", "parameters_calc"],
         # System Overviews
         "parameters_read": [
             "peak_height", "area_under_peak", "efficiency", 
@@ -1144,7 +1143,7 @@ def main():
         st.markdown(
             """
             Watch the video tutorial for a step-by-step walkthrough of how to use this app.
-            https://www.youtube.com/watch?v=example_video_link
+            https://youtu.be/BZxVgvxXyQs
             ### 1️⃣ Set System Specifications
             * Enter the specifications for your run, including backpressure, runtime, target number of peaks, and resolution requirements.
             * Click the "Submit specifications" button to save your settings before uploading any runs.
