@@ -15,6 +15,12 @@ from plotly import graph_objects as go
 import random
 from scipy.optimize import linear_sum_assignment
 
+st.set_page_config(
+    page_title="HPLC Method Development App",
+    page_icon="🧪",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 st.session_state.pending_ligand_change = False
 st.session_state.tr_slope = 0
 st.session_state.tr_intercept = 0
@@ -592,8 +598,8 @@ def int_pct_b():
     """
     Calculates the optimal Intermediate %B by fitting linear log10(k) vs %B models,
     refining peak alignment via Hungarian optimization to eliminate crossover errors,
-    and maximizing worst-case peak separation strictly within the local window of 
-    the last two screening runs that are multiples of 10 (e.g., 40% to 50%).
+    and maximizing worst-case peak separation strictly WITHIN the interior local window 
+    of the last two screening runs (excluding boundary endpoints like 40% or 50%).
     """
     ret_times = list(st.session_state.get('all_retention_times', []))
     pct_bs = list(st.session_state.get('all_pct_bs', []))
@@ -710,7 +716,7 @@ def int_pct_b():
         return float(ceil(pct_bs[-1]))
         
     # --------------------------------------------------------------------------
-    # STEP 4: SEPARATION OPTIMIZATION STRICTLY WITHIN LAST TWO MULTIPLE-OF-10 RUNS
+    # STEP 4: SEPARATION OPTIMIZATION STRICTLY WITHIN INTERMEDIATE WINDOW
     # --------------------------------------------------------------------------
     # Filter for unique %B values that are multiples of 10 (e.g. 30, 40, 50)
     multiple_of_10_bs = []
@@ -735,7 +741,12 @@ def int_pct_b():
     if b_min >= b_max:
         return float(ceil(pct_bs[-1]))
 
-    speculative_bs = np.arange(b_min, b_max + step, step)
+    # EXCLUDE ENDPOINTS (b_min and b_max) -> Strict interior search
+    speculative_bs = np.arange(b_min + step, b_max, step)
+
+    # Fallback safety if window is too narrow
+    if len(speculative_bs) == 0:
+        return float(round((b_min + b_max) / 2.0, 1))
 
     slopes_arr = np.array([c[0] for c in optimised_curves])[:, np.newaxis]
     intercepts_arr = np.array([c[1] for c in optimised_curves])[:, np.newaxis]
@@ -753,14 +764,14 @@ def int_pct_b():
     # Extract off-diagonal peak pairs -> Shape: (N*(N-1), N_speculative_steps)
     off_diag_diffs = pairwise_diffs[diag_mask, :]
 
-    # Minimum peak separation for each speculative %B step inside the window
+    # Minimum peak separation for each speculative %B step inside the interior window
     min_separations = off_diag_diffs.min(axis=0)
 
-    # Select %B index that maximizes worst-case separation within local bounds
+    # Select interior %B index that maximizes worst-case separation
     best_idx = int(np.argmax(min_separations))
     ideal_pct_b = float(speculative_bs[best_idx])
 
-    print(f"[DEBUG int_pct_b] Multiples-of-10 Window: [{b_min}%, {b_max}%]. Optimal %B found: {ideal_pct_b}%")
+    print(f"[DEBUG int_pct_b] Interior Window: ({b_min}%, {b_max}%). Optimal Intermediate %B found: {ideal_pct_b}%")
 
     return float(round(ideal_pct_b, 1))
 
