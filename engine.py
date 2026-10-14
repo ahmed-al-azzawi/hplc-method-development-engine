@@ -933,37 +933,12 @@ def equipment_interactive():
     Features dual-column navigation for modules vs. parameters and updated 
     chromatogram parameter linkages.
     """
-    # --------------------------------------------------------------------------
-    # 1. AUTO-SCROLL EXECUTION
-    # --------------------------------------------------------------------------
-    st.markdown('<div id="equipment-viewer-anchor"></div>', unsafe_allow_html=True)
-
-    if st.session_state.get('scroll_to_equipment', False):
-        st.session_state.scroll_to_equipment = False
-        st.components.v1.html(
-            """
-            <script>
-                function scrollToEquipment() {
-                    try {
-                        var target = window.parent.document.getElementById('equipment-viewer-anchor');
-                        if (target) {
-                            target.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                        }
-                    } catch (e) {
-                        window.location.hash = 'equipment-viewer-anchor';
-                    }
-                }
-                setTimeout(scrollToEquipment, 150);
-            </script>
-            """,
-            height=0,
-        )
 
     # --------------------------------------------------------------------------
     # 2. DEFINITIONS & DICTIONARIES
     # --------------------------------------------------------------------------
     MODULE_KEYS = {"solvents", "degasser", "pump", "injector", "column", "column_oven", "detector"}
-    PARAMETER_KEYS = {"selectivity", "retention", "efficiency", "backpressure", "area_under_peak", "peak_height", "peak_width", "runtime"}
+    PARAMETER_KEYS = {"selectivity", "retention", "efficiency", "backpressure", "area_under_peak", "peak_height", "peak_width", "runtime", "resolution"}
 
     LABEL_MAP = {
         "Instruments": "Instruments Overview",
@@ -982,6 +957,7 @@ def equipment_interactive():
         "peak_height": "Peak Height",
         "peak_width": "Peak Width",
         "runtime": "Runtime",
+        "resolution": "Resolution",
         "parameters_read": "Parameters Read from Chromatogram"
     }
 
