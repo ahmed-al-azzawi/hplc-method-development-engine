@@ -1,12 +1,35 @@
-APP_NAME: "HPLC Method Development App" #give your app a nice name
-APP_REQUIREMENTS: #app requirements separated by a '-' on each new line. Requirements MUST be compatible with pyodide. Suggest specifying versions.
+APP_NAME: "HPLC Method Development App"
+APP_ENTRYPOINT: "engine.py"
+CONFIG: false
+
+APP_REQUIREMENTS:
   - streamlit
   - pandas
   - numpy
   - chardet
   - scipy
   - plotly
-APP_ENTRYPOINT: engine.py #entrypoint to app - main python file
-CONFIG: false
-APP_FILES: #each file separated by a '-'. Can be .py files or other filetypes that will be converted to binary and embeded in the html.
+
+APP_FILES:
   - engine.py
+  # Equipment Monograph Images
+  - assets/manual_injector.png
+  - assets/uhplc.png
+  - assets/autosampler.png
+  - assets/solvents.png
+  - assets/degasser.png
+  - assets/pump.png
+  - assets/injector.png
+  - assets/column.png
+  - assets/column_oven.png
+  - assets/detector.png
+  # Parameter Monograph Images
+  - assets/resolution.png
+  - assets/selectivity.png
+  - assets/retention.png
+  - assets/efficiency.png
+  - assets/backpressure.png
+  - assets/area_under_peak.png
+  - assets/peak_height.png
+  - assets/runtime.png
+  - assets/parameters_read.png
