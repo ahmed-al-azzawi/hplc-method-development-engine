@@ -3,7 +3,7 @@
 # ==============================================================================
 
 import sys
-from streamlit.web import cli as stcli
+#from streamlit.web import cli as stcli
 import streamlit as st
 import pandas as pd
 import chardet
@@ -941,8 +941,8 @@ def handle_selectivity(df=None, prev_b=False):
 def equipment_interactive():
     """
     Standalone interactive HPLC equipment & parameter monograph viewer.
-    Features dual-column navigation for modules vs. parameters and updated 
-    chromatogram parameter linkages.
+    Features dual-column navigation for modules vs. parameters, segmented top overview,
+    and side-by-side display for calculated vs. read chromatogram parameters.
     """
 
     # --------------------------------------------------------------------------
@@ -968,8 +968,9 @@ def equipment_interactive():
         "peak_height": "Peak Height",
         "peak_width": "Peak Width",
         "runtime": "Runtime",
-        "resolution": "Resolution",
-        "parameters_read": "Parameters Read from Chromatogram"
+        "resolution": "Resolution (Rs)",
+        "parameters_read": "Parameters Read from Chromatogram",
+        "parameters_calc": "Parameters Calculated"
     }
 
     REVERSE_LABEL_MAP = {v: k for k, v in LABEL_MAP.items()}
@@ -977,28 +978,32 @@ def equipment_interactive():
     NAVIGATION_LINKS = {
         "Instruments": [
             "solvents", "degasser", "pump", "injector", 
-            "column", "column_oven", "detector", "parameters_read"
+            "column", "column_oven", "detector", "parameters_read", "parameters_calc"
         ],
-        "solvents": ["selectivity", "retention", "Instruments", "parameters_read"],
-        "degasser": ["Instruments", "parameters_read"],
-        "pump": ["retention", "efficiency", "backpressure", "Instruments", "parameters_read"],
-        "injector": ["area_under_peak", "Instruments", "parameters_read"],
-        "column": ["efficiency", "backpressure", "selectivity", "runtime", "Instruments", "parameters_read"],
-        "column_oven": ["runtime", "backpressure", "selectivity", "retention", "Instruments", "parameters_read"],
-        "detector": ["area_under_peak", "Instruments", "parameters_read"],
+        "solvents": ["selectivity", "retention", "Instruments", "parameters_read", "parameters_calc"],
+        "degasser": ["Instruments", "parameters_read", "parameters_calc"],
+        "pump": ["retention", "efficiency", "backpressure", "Instruments", "parameters_read", "parameters_calc"],
+        "injector": ["area_under_peak", "Instruments", "parameters_read", "parameters_calc"],
+        "column": ["efficiency", "backpressure", "selectivity", "runtime", "Instruments", "parameters_read", "parameters_calc"],
+        "column_oven": ["runtime", "backpressure", "selectivity", "retention", "Instruments", "parameters_read", "parameters_calc"],
+        "detector": ["area_under_peak", "Instruments", "parameters_read", "parameters_calc"],
         # Parameters
-        "selectivity": ["solvents", "column", "column_oven", "Instruments", "parameters_read"],
-        "retention": ["solvents", "pump", "column_oven", "Instruments", "parameters_read"],
-        "efficiency": ["pump", "column", "Instruments", "parameters_read"],
-        "backpressure": ["pump", "column", "column_oven", "Instruments", "parameters_read"],
-        "area_under_peak": ["injector", "detector", "Instruments", "parameters_read"],
-        "peak_height": ["Instruments", "parameters_read"],
-        "peak_width": ["Instruments", "parameters_read"],
-        "runtime": ["column", "column_oven", "Instruments", "parameters_read"],
-        # Chromatogram Parameters Read
+        "selectivity": ["solvents", "column", "column_oven", "Instruments", "parameters_read", "parameters_calc"],
+        "retention": ["solvents", "pump", "column_oven", "Instruments", "parameters_read", "parameters_calc"],
+        "efficiency": ["pump", "column", "Instruments", "parameters_read", "parameters_calc"],
+        "backpressure": ["pump", "column", "column_oven", "Instruments", "parameters_read", "parameters_calc"],
+        "area_under_peak": ["injector", "detector", "Instruments", "parameters_read", "parameters_calc"],
+        "peak_height": ["Instruments", "parameters_read", "parameters_calc"],
+        "peak_width": ["Instruments", "parameters_read", "parameters_calc"],
+        "resolution": ["Instruments", "parameters_read", "parameters_calc"],
+        "runtime": ["column", "column_oven", "Instruments", "parameters_read", "parameters_calc"],
+        # System Overviews
         "parameters_read": [
             "peak_height", "area_under_peak", "efficiency", 
-            "peak_width", "backpressure", "runtime", "Instruments"
+            "peak_width", "resolution", "backpressure", "runtime", "Instruments", "parameters_calc"
+        ],
+        "parameters_calc": [
+            "resolution", "retention", "selectivity", "efficiency", "Instruments", "parameters_read"
         ]
     }
 
@@ -1009,7 +1014,7 @@ def equipment_interactive():
 
     with st.container():
         valid_targets = NAVIGATION_LINKS.get(current_node, ["Instruments"])
-        top_system_keys = ["Instruments", "parameters_read"]
+        top_system_keys = ["Instruments", "parameters_read", "parameters_calc"]
 
         # Top System Overview Control
         top_keys = [k for k in top_system_keys if k in valid_targets or k == current_node]
@@ -1078,6 +1083,16 @@ def equipment_interactive():
                 st.image("assets/manual_injector.png")
                 st.image("assets/uhplc.png")
                 st.image("assets/autosampler.png")
+            elif current_node == "parameters_calc":
+                st.subheader("Calculated Chromatographic Parameters")
+                # 2x2 side-by-side display grid for calculated parameters
+                grid_col1, grid_col2 = st.columns(2, gap="small")
+                with grid_col1:
+                    st.image("assets/resolution.png", caption="Resolution (Rs)")
+                    st.image("assets/selectivity.png", caption="Selectivity (α)")
+                with grid_col2:
+                    st.image("assets/retention.png", caption="Retention Factor (k)")
+                    st.image("assets/efficiency.png", caption="Efficiency / Column Plates (N)")
             else:
                 node_title = LABEL_MAP.get(current_node, current_node)
                 st.subheader(f"Monograph: {node_title}")
@@ -1874,6 +1889,6 @@ def main():
 if __name__ == "__main__":
     if not st.runtime.exists():
         sys.argv = ["streamlit", "run", __file__]
-        sys.exit(stcli.main())
+        #sys.exit(stcli.main())
 
     main()
