@@ -3,7 +3,7 @@
 # ==============================================================================
 
 import sys
-#from streamlit.web import cli as stcli
+from streamlit.web import cli as stcli
 import streamlit as st
 import pandas as pd
 import chardet
@@ -14,6 +14,7 @@ from math import ceil
 from plotly import graph_objects as go
 import random
 from scipy.optimize import linear_sum_assignment
+from types import SimpleNamespace as sns 
 
 st.set_page_config(
     page_title="HPLC Method Development App",
@@ -25,6 +26,329 @@ st.session_state.pending_ligand_change = False
 st.session_state.tr_slope = 0
 st.session_state.tr_intercept = 0
 st.session_state.tr_tzero = 0
+
+
+
+
+
+class Efficiency:
+
+    @staticmethod
+    def _get_safe_last(key: str, default=None):
+        val = st.session_state.get(key, [])
+        if isinstance(val, list) and len(val) > 0:
+            return val[-1]
+        return default
+
+    @staticmethod
+    def find_efficiency(df: pd.DataFrame) -> sns:
+        target_string = 'Peak Table'
+        matches = df.astype(str).apply(lambda col: col.str.contains(target_string, case=False, na=False))
+        if not matches.any().any():
+            raise ValueError(f"'{target_string}' anchor was not found in the DataFrame.")
+        
+        match_locations = matches.stack()
+        anchor_row, anchor_col = match_locations[match_locations].index[0]
+        anchor_row_idx = df.index.get_loc(anchor_row)
+
+        print(f"Anchor found at Row Index: {anchor_row_idx}")
+        print(f'Column Index Anchor: {anchor_col}')
+        
+        plate_count_col = 12
+        plate_height_col = 13
+
+        # 2. Locate end anchor (first occurrence of 'Results' or 'Signal' AFTER start anchor)
+        end_matches = df.iloc[anchor_row_idx + 1:].astype(str).apply(
+            lambda col: col.str.contains('Results|Signal|Chromatogram', case=False, na=False)
+        )
+
+        # 3. Bound sub_df strictly between start and end anchors
+        if end_matches.any().any():
+            anchor_end = end_matches.stack()[end_matches.stack()].index[0][0]
+            sub_df = df.iloc[anchor_row_idx + 1 : anchor_end]
+        else:
+            sub_df = df.iloc[anchor_row_idx + 1 :]
+        valid_plates = pd.to_numeric(sub_df.iloc[:, plate_count_col], errors='coerce').dropna()
+        valid_plates = valid_plates[valid_plates > 0]
+        print(f'Valid Plates: {str(valid_plates)}')
+        valid_plates = valid_plates[valid_plates.astype(str).str.strip() != '']
+        if valid_plates.empty:
+            raise ValueError("No valid plate number found in column 13 below 'Peak Table'.")
+        plate_count = float(valid_plates.iloc[-1])
+        
+        valid_heights = sub_df.iloc[:, plate_height_col].dropna()
+        valid_heights = valid_heights[valid_heights.astype(str).str.strip() != '']
+        if valid_heights.empty:
+            raise ValueError("No valid plate height found in column 14 below 'Peak Table'.")
+        plate_height = float(valid_heights.iloc[-1])
+        
+        for val in ['plates', 'heights']:
+            if val not in st.session_state or not isinstance(st.session_state[val], list):
+                st.session_state[val] = []
+        
+        st.session_state.plates.append(int(plate_count))
+        st.session_state.heights.append(plate_height)
+        return sns(plates=int(plate_count), height=plate_height)
+
+    @staticmethod
+    def predict_required_plates():
+        current_res = Efficiency._get_safe_last('all_resolutions_final', 1.0)
+        current_plates = Efficiency._get_safe_last('plates', 10000)
+        required_res = st.session_state.get('res_spec', 1.5)
+        
+        required_plates = ((required_res * (current_plates ** 0.5)) / current_res) ** 2
+        if 'required_plates_history' not in st.session_state or not isinstance(st.session_state.required_plates_history, list):
+            st.session_state.required_plates_history = [] 
+            
+        st.session_state.required_plates_history.append(required_plates)
+        return required_plates
+
+    @staticmethod
+    def column_length():
+        current_length = Efficiency._get_safe_last('all_column_lengths', 150.0)
+        current_height = Efficiency._get_safe_last('heights', None)
+        
+        if current_height is None:
+            current_N = Efficiency._get_safe_last('plates', 10000)
+            current_height_mm = current_length / current_N
+        else:
+            current_height_mm = current_height / 1000.0
+
+        current_bp = Efficiency._get_safe_last('all_backpressures', 1000.0)
+        current_tR = Efficiency._get_safe_last('all_run_times', 10.0)
+        required_plates = Efficiency._get_safe_last('required_plates_history', None)
+        if required_plates is None:
+            required_plates = Efficiency.predict_required_plates()
+
+        available_lengths = st.session_state.get('available_column_lengths', [50.0, 100.0, 150.0, 250.0])
+        plate_counts = [L / current_height_mm for L in available_lengths]
+        valid_candidates = [(L, N) for L, N in zip(available_lengths, plate_counts) if N >= required_plates]
+
+        if not valid_candidates:
+            return None
+
+        new_length, predicted_N = min(valid_candidates, key=lambda pair: pair[0])
+        length_ratio = new_length / current_length
+        predicted_bp = current_bp * length_ratio
+        predicted_tR = current_tR * length_ratio
+
+        enough_alone = (
+            predicted_bp <= st.session_state.get('bpspec', 4000.0) and
+            predicted_tR <= st.session_state.get('runspec', 15.0)
+        )
+
+        if enough_alone:
+            return {'length': new_length, 'bp': predicted_bp, 'tR': predicted_tR, 'plates': predicted_N}
+        return None
+
+    @staticmethod
+    def particle_size():
+        current_bp = Efficiency._get_safe_last('all_backpressures', 1000.0)
+        current_tR = Efficiency._get_safe_last('all_run_times', 10.0)
+        current_N = Efficiency._get_safe_last('plates', 10000)
+        current_PS = Efficiency._get_safe_last('all_particle_sizes', 5.0)
+        
+        required_plates = Efficiency._get_safe_last('required_plates_history', None)
+        if required_plates is None:
+            required_plates = Efficiency.predict_required_plates()
+
+        available_sizes = st.session_state.get('available_particle_sizes', [1.8, 2.7, 3.5, 5.0])
+        plate_counts = [current_N * (current_PS / new_PS) for new_PS in available_sizes]
+        valid_candidates = [(PS, N) for PS, N in zip(available_sizes, plate_counts) if N >= required_plates]
+
+        if not valid_candidates:
+            return None
+
+        new_size, predicted_N = max(valid_candidates, key=lambda pair: pair[0])
+        size_ratio = (current_PS / new_size) ** 2
+        predicted_bp = current_bp * size_ratio
+        predicted_tR = current_tR
+
+        enough_alone = (
+            predicted_bp <= st.session_state.get('bpspec', 5000.0) and
+            predicted_tR <= st.session_state.get('runspec', 30.0)
+        )
+
+        if enough_alone:
+            return {'size': new_size, 'bp': predicted_bp, 'tR': predicted_tR, 'plates': predicted_N}
+        return None
+
+    @staticmethod
+    def spp():
+        current_bp = Efficiency._get_safe_last('all_backpressures', 1000.0)
+        current_tR = Efficiency._get_safe_last('all_run_times', 10.0)
+        current_N = Efficiency._get_safe_last('plates', 10000)
+        current_is_spp = Efficiency._get_safe_last('is_spp_list', False)
+
+        if current_is_spp:
+            return None
+
+        required_plates = Efficiency._get_safe_last('required_plates_history', None)
+        if required_plates is None:
+            required_plates = Efficiency.predict_required_plates()
+
+        predicted_N = current_N * 1.5
+        predicted_bp = current_bp * 0.85
+        predicted_tR = current_tR
+
+        enough_alone = (
+            predicted_N >= required_plates and
+            predicted_bp <= st.session_state.get('bpspec', 5000.0) and
+            predicted_tR <= st.session_state.get('runspec', 30.0)
+        )
+
+        if enough_alone:
+            return {'is_spp': True, 'bp': predicted_bp, 'tR': predicted_tR, 'plates': predicted_N}
+        return None
+
+    @staticmethod
+    def flow_rate():
+        current_flow = Efficiency._get_safe_last('all_flow_rates', 1.0)
+        current_bp = Efficiency._get_safe_last('all_backpressures', 1000.0)
+        current_tR = Efficiency._get_safe_last('all_run_times', 10.0)
+        current_length = Efficiency._get_safe_last('all_column_lengths', 150.0)
+        current_dp = Efficiency._get_safe_last('all_particle_sizes', 5.0)
+        current_is_spp = Efficiency._get_safe_last('is_spp_list', False)
+        current_rs = Efficiency._get_safe_last('all_resolutions_final', 1.0)
+        current_N = Efficiency._get_safe_last('plates', 10000.0)
+        
+        bpspec = st.session_state.get('bpspec', 5000.0)
+        runspec = st.session_state.get('runspec', 30.0)
+        res_spec = st.session_state.get('res_spec', 1.5)
+
+        ret_values = st.session_state.get('all_retention_times', [])
+        if not ret_values or len(ret_values[-1]) == 0:
+            return None
+            
+        all_tzeros = [tx[0] for tx in ret_values]
+        tzero = float(np.mean(all_tzeros))
+
+        # Calculate baseline linear velocity and model HETP at current flow rate
+        u_1 = current_length / (tzero * 60.0)
+        spp_factor = 1.5 if current_is_spp else 1.0
+        hetp_1 = (1.5 * current_dp + (3.0 / u_1) + 0.15 * (current_dp ** 2) * u_1) / spp_factor
+
+        # Identify method deficits
+        rs_defect = current_rs < res_spec
+        time_defect = current_tR > runspec
+
+        # If method is fully in spec, no flow adjustment is needed
+        if not rs_defect and not time_defect:
+            return None
+
+        flow_candidates = np.arange(0.3, 2.05, 0.05)
+        valid_candidates = []
+
+        for F_cand in flow_candidates:
+            flow_ratio = F_cand / current_flow
+            u_2 = u_1 * flow_ratio
+            
+            # Calculate candidate model HETP
+            hetp_2 = (1.5 * current_dp + (3.0 / u_2) + 0.15 * (current_dp ** 2) * u_2) / spp_factor
+            
+            # Relative efficiency ratio (gamma) & direct resolution prediction
+            gamma = hetp_1 / hetp_2
+            predicted_rs = current_rs * np.sqrt(gamma)
+            predicted_N = current_N * gamma
+            
+            predicted_bp = current_bp * flow_ratio
+            predicted_tR = current_tR / flow_ratio
+
+            # Enforce physical pressure and run-time boundary specs
+            if predicted_bp <= bpspec and predicted_tR <= runspec:
+                if rs_defect:
+                    # Must hit or exceed resolution spec directly
+                    if predicted_rs >= res_spec:
+                        valid_candidates.append({
+                            'flow_rate': float(round(F_cand, 2)),
+                            'bp': float(predicted_bp),
+                            'tR': float(predicted_tR),
+                            'plates': float(predicted_N),
+                            'predicted_rs': float(predicted_rs)
+                        })
+                elif time_defect:
+                    # Must reduce run time below spec without dropping resolution below spec
+                    if predicted_tR <= runspec and predicted_rs >= res_spec:
+                        valid_candidates.append({
+                            'flow_rate': float(round(F_cand, 2)),
+                            'bp': float(predicted_bp),
+                            'tR': float(predicted_tR),
+                            'plates': float(predicted_N),
+                            'predicted_rs': float(predicted_rs)
+                        })
+
+        if not valid_candidates:
+            return None
+
+        # Pick the highest flow candidate that meets specifications to optimize throughput
+        best_candidate = max(valid_candidates, key=lambda x: x['flow_rate'])
+        return {
+            'flow_rate': best_candidate['flow_rate'],
+            'bp': best_candidate['bp'],
+            'tR': best_candidate['tR'],
+            'plates': best_candidate['plates']
+        }
+
+    @staticmethod
+    def calculate_rs_floor() -> dict:
+        current_bp = Efficiency._get_safe_last('all_backpressures', 1000.0)
+        current_tR = Efficiency._get_safe_last('all_run_times', 10.0)
+        current_L = Efficiency._get_safe_last('all_column_lengths', 150.0)
+        current_PS = Efficiency._get_safe_last('all_particle_sizes', 5.0)
+        current_N = Efficiency._get_safe_last('plates', 10000)
+        
+        bpspec = st.session_state.get('bpspec', 5000.0)
+        runspec = st.session_state.get('runspec', 30.0)
+        res_spec = st.session_state.get('res_spec', 1.5)
+
+        hr = np.sqrt((bpspec / current_bp) * (runspec / current_tR)) if (current_bp > 0 and current_tR > 0) else 1.0
+        van_deemter_min_h_factor = 1.5 + 2.0 * np.sqrt(3.0 * 0.15)
+
+        n_max_fpp = (1000.0 * current_L * hr) / (current_PS * van_deemter_min_h_factor)
+        n_max_spp = n_max_fpp * 1.5
+
+        rs_floor_fpp = res_spec * np.sqrt(current_N / n_max_fpp) if n_max_fpp > 0 else res_spec
+        rs_floor_spp = res_spec * np.sqrt(current_N / n_max_spp) if n_max_spp > 0 else res_spec
+
+        return {
+            'headroom': float(hr),
+            'n_max_fpp': float(n_max_fpp),
+            'n_max_spp': float(n_max_spp),
+            'rs_floor_fpp': float(rs_floor_fpp),
+            'rs_floor_spp': float(rs_floor_spp)
+        }
+
+    @staticmethod
+    def is_Rs_below_floor() -> bool:
+        current_rs = Efficiency._get_safe_last('all_resolutions_final', 0.0)
+        current_is_spp = Efficiency._get_safe_last('is_spp_list', False)
+        
+        floors = Efficiency.calculate_rs_floor()
+        active_floor = floors['rs_floor_spp'] if current_is_spp else floors['rs_floor_fpp']
+
+        return current_rs < active_floor
+
+    @staticmethod
+    def diagnose_flow_failure() -> str:
+        current_bp = Efficiency._get_safe_last('all_backpressures', 1000.0)
+        current_flow = Efficiency._get_safe_last('all_flow_rates', 1.0)
+        bpspec = st.session_state.get('bpspec', 5000.0)
+
+        bp_at_max = current_bp * (2.0 / current_flow) if current_flow > 0 else current_bp
+        if bp_at_max > bpspec:
+            return f"Flow rate increase is constrained by pressure limit (at 2.0 mL/min, BP reaches {bp_at_max:.1f} psi vs {bpspec:.1f} psi spec)."
+
+        return "Flow rate adjustments alone cannot yield sufficient theoretical plates ($N$) to achieve required resolution."
+        
+    
+
+
+
+    
+   
+
+
+
 
 def extract_measured_temp(df: pd.DataFrame) -> float:
     """
@@ -156,11 +480,34 @@ def safe_int_pct_b():
             return float(st.session_state.all_pct_bs[-1])
         return 50.0
 
+def on_override_segmented_control_change(control_key: str):
+    """
+    Callback function triggered the exact millisecond the user selects an option 
+    in st.segmented_control. Guarantees immediate execution of handle_selectivity.
+    """
+    selected_val = st.session_state.get(control_key)
+    if selected_val == "Switch to Selectivity Optimization":
+        # Force execution of selectivity progression logic
+        handle_selectivity(prev_b=False)
+
+
 def evaluate_next_run_conditions(peakspec, runspec, res_spec, bpspec):
     """
-    Evaluates chromatographic metrics of the latest run and outputs the next strategy automatically.
+    Evaluates chromatographic metrics of the latest run and displays actionable next run strategy.
+    Guarantees proposed values (F, L, dp, SPP) are displayed and appended to session_state arrays.
     """
-    if not st.session_state.get('all_backpressures'):
+    required_state_keys = [
+        'plates', 'heights', 'required_plates_history', 'is_spp_list',
+        'all_backpressures', 'all_peak_counts', 'all_run_times',
+        'all_resolutions_final', 'all_equilibrated', 'all_column_lengths',
+        'all_particle_sizes', 'all_flow_rates', 'all_internal_diameters',
+        'all_retention_times', 'all_pct_bs'
+    ]
+    for key in required_state_keys:
+        if key not in st.session_state:
+            st.session_state[key] = []
+
+    if not st.session_state.all_backpressures:
         return
 
     latest_bp = st.session_state.all_backpressures[-1]
@@ -168,29 +515,109 @@ def evaluate_next_run_conditions(peakspec, runspec, res_spec, bpspec):
     latest_runtime = st.session_state.all_run_times[-1]
     latest_resolution = st.session_state.all_resolutions_final[-1]
     latest_equilibration = st.session_state.all_equilibrated[-1]
+    latest_N = st.session_state.plates[-1] if st.session_state.plates else 1.0
     run_count = len(st.session_state.all_backpressures)
+    
     static_keys = [
         'all_solvents', 'all_ligands', 'all_bead_types',
         'all_pore_sizes', 'all_coreshells', 'all_carbon_loads',
         'all_column_lengths', 'all_internal_diameters', 
         'all_particle_sizes', 'all_flow_rates', 'all_temperatures'
     ]
+    
     if latest_equilibration:
         st.success('Backpressure is stable, column is equilibrated well.')
-    # 1. Backpressure Check
+
+    def update_session_state_keys(new_length=None, new_ps=None, new_flow=None, is_spp=None):
+        st.session_state.all_pct_bs.append(st.session_state.all_pct_bs[-1])
+        for key in static_keys:
+            val = st.session_state[key][-1]
+            if key == 'all_column_lengths' and new_length is not None:
+                val = new_length
+            elif key == 'all_particle_sizes' and new_ps is not None:
+                val = new_ps
+            elif key == 'all_flow_rates' and new_flow is not None:
+                val = new_flow
+            elif key == 'all_coreshells' and is_spp is not None:
+                val = 'Core-Shell' if is_spp else val
+            st.session_state[key].append(val)
+
+    def display_strategy_and_update(action_title, eval_result, controller_text="Column / Pump"):
+        if eval_result is not None:
+            if 'plates' in eval_result:
+                pred_N = eval_result['plates']
+            else:
+                pred_N = latest_N
+                if 'length' in eval_result:
+                    pred_N *= (eval_result['length'] / st.session_state.all_column_lengths[-1])
+                if 'size' in eval_result:
+                    pred_N *= (st.session_state.all_particle_sizes[-1] / eval_result['size'])
+                if eval_result.get('is_spp'):
+                    pred_N *= 1.5
+
+            pred_Rs = latest_resolution * ((pred_N / latest_N) ** 0.5)
+            
+            # Format proposed specifications explicitly
+            proposed_details = []
+            if 'flow_rate' in eval_result:
+                proposed_details.append(f"$F$: {eval_result['flow_rate']:.2f} mL/min")
+            if 'length' in eval_result:
+                proposed_details.append(f"$L$: {eval_result['length']} mm")
+            if 'size' in eval_result:
+                proposed_details.append(f"$d_p$: {eval_result['size']} µm")
+            if eval_result.get('is_spp'):
+                proposed_details.append("Core-Shell (SPP)")
+
+            param_str = f" ({', '.join(proposed_details)})" if proposed_details else ""
+
+            st.info(
+                f"**Next Run Strategy:** {action_title}{param_str}\n\n"
+                f"**Predicted Next Conditions:** $t_R$ {eval_result['tR']:.1f} min, "
+                f"BP {eval_result['bp']:.1f} psi, $R_s$ {pred_Rs:.2f}\n\n"
+                f"*Controlled by:* {controller_text} | *Cycle:* Efficiency (N)"
+            )
+            update_session_state_keys(
+                new_length=eval_result.get('length'),
+                new_ps=eval_result.get('size'),
+                new_flow=eval_result.get('flow_rate'),
+                is_spp=eval_result.get('is_spp')
+            )
+        else:
+            failure_reason = Efficiency.diagnose_flow_failure()
+            
+            st.warning(
+                f"**Next Run Strategy:** {action_title}\n\n"
+                f"**Physical Limitation:** {failure_reason}\n\n"
+                f"*Controlled by:* {controller_text} | *Cycle:* Efficiency (N)"
+            )
+            update_session_state_keys()
+
+            ctrl_key = f"override_ctrl_{run_count}"
+
+            # Streamlit segmented control using on_change callback
+            st.segmented_control(
+                "Efficiency specs unreachable. Select action:",
+                options=["Continue Current Physical Search", "Switch to Selectivity Optimization"],
+                default="Continue Current Physical Search",
+                key=ctrl_key,
+                on_change=on_override_segmented_control_change,
+                args=(ctrl_key,)
+            )
+
+    # --- 1. Backpressure Check ---
     if latest_bp > bpspec:
-        st.caption(f"📊 **Run Metrics:** Backpressure ({latest_bp:.1f} bar) > Spec ({bpspec:.1f} bar) | Peaks: {latest_peaks}/{peakspec}")
+        st.caption(f"📊 **Run Metrics:** Backpressure ({latest_bp:.1f} psi) > Spec ({bpspec:.1f} psi) | Peaks: {latest_peaks}/{peakspec}")
         st.warning(f'Run number {run_count} exceeded backpressure limit!')
 
-    # 2. Too Many Peaks
+    # --- 2. Too Many Peaks ---
     elif latest_peaks > peakspec:
         st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) > Spec ({peakspec}) | $t_R$: {latest_runtime:.1f} min | $R_s$: {latest_resolution:.2f}")
         st.warning(f'Run number {run_count} has more peaks than expected. Investigate for contamination.')
 
-    # 3. Fewer Peaks Than Spec
+    # --- 3. Fewer Peaks Than Spec ---
     elif latest_peaks < peakspec:
         if latest_runtime < (0.5 * runspec):
-            st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) < Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) << Spec ({runspec} min) | $R_s$: {latest_resolution:.2f}")
+            st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) < Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) << Spec ({runspec} min)")
             current_pct_b = st.session_state.all_pct_bs[-1]
             new_pct_b = current_pct_b - 10.0
             
@@ -204,8 +631,7 @@ def evaluate_next_run_conditions(peakspec, runspec, res_spec, bpspec):
 
         elif latest_runtime < runspec:
             if not st.session_state.get('minbdone', False):
-                st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) < Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) < Spec ({runspec} min) | $R_s$: {latest_resolution:.2f}")
-                
+                st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) < Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) < Spec ({runspec} min)")
                 c1 = safe_min_b(runspec)
                 c2 = safe_int_pct_b()
                 st.session_state.choice1 = c1
@@ -219,44 +645,72 @@ def evaluate_next_run_conditions(peakspec, runspec, res_spec, bpspec):
                 st.session_state.show_decision_radio = True
                 st.session_state.minbdone = True
             else:
-                st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) < Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) < Spec ({runspec} min) | min%B already executed -> Triggering Selectivity.")
+                st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) < Spec ({peakspec}) | min%B already executed -> Triggering Selectivity.")
                 handle_selectivity(prev_b=False)
 
         elif latest_runtime > runspec:
-            st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) < Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) > Spec ({runspec} min) | $R_s$: {latest_resolution:.2f}")
+            st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) < Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) > Spec ({runspec} min)")
             handle_selectivity(prev_b=False)
 
-    # 4. Target Peak Count Met
+    # --- 4. Target Peak Count Met (Matrix Evaluation) ---
     elif latest_peaks == peakspec:
         tR_far_below = latest_runtime < (0.5 * runspec)
-        tR_below = latest_runtime < runspec and not tR_far_below
+        tR_below = (latest_runtime < runspec) and not tR_far_below
         tR_above = latest_runtime > runspec
         pass_resolution = latest_resolution >= res_spec
+        
+        rs_below_floor = Efficiency.is_Rs_below_floor()
 
-        if tR_far_below:
-            if pass_resolution:
-                st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) << Spec ({runspec} min) | $R_s$ ({latest_resolution:.2f}) >= Spec ({res_spec})")
-                st.success("🎉 **Method MET!** Optionally increase Flow Rate ($F$) to shorten the run time further.\n\n*Cycle:* Efficiency (N)")
-            else:
-                st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) << Spec ({runspec} min) | $R_s$ ({latest_resolution:.2f}) < Spec ({res_spec})")
-                st.info("**Next Run Strategy:** Increase Column Length ($L$) (watch BP) OR decrease Flow Rate ($F$) OR decrease Particle Size ($dp$) (watch BP) OR switch to Core-Shell (SPP).\n\n*Controlled by:* Column / Pump | *Cycle:* Efficiency (N)")
-        elif tR_below:
-            if pass_resolution:
-                st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) < Spec ({runspec} min) | $R_s$ ({latest_resolution:.2f}) >= Spec ({res_spec})")
-                st.success("🎉 **Method MET!** Optionally increase Flow Rate ($F$) to shorten the run time further.\n\n*Cycle:* Efficiency (N)")
-            else:
-                st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) < Spec ({runspec} min) | $R_s$ ({latest_resolution:.2f}) < Spec ({res_spec})")
-                st.info("**Next Run Strategy:** Decrease Flow Rate ($F$) OR decrease Particle Size ($dp$) (watch BP) OR switch to Core-Shell (SPP).\n\n*Controlled by:* Pump / Column | *Cycle:* Efficiency (N)")
-        elif tR_above:
-            if pass_resolution:
-                st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) > Spec ({runspec} min) | $R_s$ ({latest_resolution:.2f}) >= Spec ({res_spec})")
-                st.info("**Next Run Strategy:** Increase Flow Rate ($F$) to shorten the run time.\n\n*Controlled by:* Pump | *Cycle:* Efficiency (N)")
-            else:
-                st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) > Spec ({runspec} min) | $R_s$ ({latest_resolution:.2f}) < Spec ({res_spec})")
-                st.info("**Next Run Strategy:** Decrease Particle Size ($dp$) (watch BP), then increase Flow Rate ($F$) to shorten the run time.\n\n*Controlled by:* Column / Pump | *Cycle:* Efficiency (N)")
-        st.session_state.all_pct_bs.append(st.session_state.all_pct_bs[-1])
-        for key in static_keys:
-            st.session_state[key].append(st.session_state[key][-1])
+        if pass_resolution:
+            st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $R_s$ ({latest_resolution:.2f}) >= Spec ({res_spec})")
+            if tR_far_below or tR_below:
+                st.success("🎉 **Method MET!** Optionally increase Flow Rate ($F$) to shorten the run time further.\n\n*Controlled by:* Pump | *Cycle:* Efficiency (N)")
+                update_session_state_keys()
+            elif tR_above:
+                res = Efficiency.flow_rate()
+                display_strategy_and_update("Increase Flow Rate (F) to shorten run time", res, controller_text="Pump")
+
+        else:
+            if tR_far_below:
+                if rs_below_floor:
+                    st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ << Spec | $R_s$ below floor")
+                    res = Efficiency.column_length()
+                    display_strategy_and_update("Increase Column Length (L)", res, controller_text="Column")
+                else:
+                    st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ << Spec | Floor < $R_s$ < Spec")
+                    candidates = [
+                        Efficiency.column_length(),
+                        Efficiency.flow_rate(),
+                        Efficiency.particle_size(),
+                        Efficiency.spp()
+                    ]
+                    valid = [c for c in candidates if c is not None]
+                    best = min(valid, key=lambda x: x['tR']) if valid else None
+                    display_strategy_and_update("Increase L OR decrease F OR decrease PS OR switch to SPP", best, controller_text="Column / Pump")
+
+            elif tR_below:
+                if rs_below_floor:
+                    st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ < Spec | $R_s$ below floor -> Triggering Selectivity.")
+                    handle_selectivity(prev_b=False)
+                else:
+                    st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ < Spec | Floor < $R_s$ < Spec")
+                    candidates = [
+                        Efficiency.flow_rate(),
+                        Efficiency.particle_size(),
+                        Efficiency.spp()
+                    ]
+                    valid = [c for c in candidates if c is not None]
+                    best = min(valid, key=lambda x: x['tR']) if valid else None
+                    display_strategy_and_update("Decrease F OR decrease PS OR switch to SPP", best, controller_text="Pump / Column")
+
+            elif tR_above:
+                if rs_below_floor:
+                    st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ > Spec | $R_s$ below floor -> Triggering Selectivity.")
+                    handle_selectivity(prev_b=False)
+                else:
+                    st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ > Spec | Floor < $R_s$ < Spec")
+                    res = Efficiency.flow_rate()
+                    display_strategy_and_update("Decrease Particle Size (PS), then adjust Flow Rate (F)", res, controller_text="Column / Pump")
 
 def generate_selectivity_plot():
     """Generates a simplified Plotly graph using stored slopes, intercepts, and R^2 values."""
@@ -1406,7 +1860,7 @@ def main():
     # Tracker set to prevent re-parsing on every Streamlit page re-render
     if 'processed_file_ids' not in st.session_state:
         st.session_state.processed_file_ids = set()
-
+  
     # 2. Uploading & Single-Execution Processing
     added_file = st.file_uploader('Upload a CSV file of your run.', type='csv', key="main_run_uploader")
 
@@ -1418,7 +1872,8 @@ def main():
         if file_id not in st.session_state.processed_file_ids:
             try:
                 dataframe_added = safe_read(added_file)
-                
+                efficiency_data = Efficiency.find_efficiency(dataframe_added)
+                required_n = Efficiency.predict_required_plates()
                 # Peak Count
                 peak_cnt = peak_count(dataframe_added)
                 
@@ -1430,6 +1885,7 @@ def main():
                 
                 # Backpressure
                 bp_analysis = find_backpressure(dataframe_added)
+                
                 
                 # --- FILENAME PARSING ---
                 filename_str = added_file.name.rsplit('.', 1)[0]
@@ -1888,6 +2344,6 @@ def main():
 if __name__ == "__main__":
     if not st.runtime.exists():
         sys.argv = ["streamlit", "run", __file__]
-        #sys.exit(stcli.main())
+        sys.exit(stcli.main())
 
     main()
