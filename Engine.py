@@ -2033,6 +2033,8 @@ def main():
             ### 1️⃣ Set System Specifications
             * Enter the specifications for your run, including backpressure, runtime, target number of peaks, and resolution requirements.
             * Click the "Submit specifications" button to save your settings before uploading any runs.
+            * If you do not do this, then the default specifications will be submitted. They may not meet your run requirements.
+            * Click on the Edit Column Inventory menu to change the inventory of available columns. Columns your lab has will be sorted to the top of the pile when efficiency is calculated.
             ---
 
             ### 2️⃣ Upload Chromatographic Runs Sequentially
@@ -2056,6 +2058,8 @@ def main():
             * Initially, Intermediate %B builds a rough model of each compound using elution order. Using Hungarian algorithm, peaks are assigned accordingly.
             * Due to divergence and high-%B runs having few peaks, the model restricts the calculation to the likely %B ranges that will have an ideal, missed %B.
             * Scroll down to view the Intermediate %B and Selectivity Plot.
+            * Efficiency calculations are automated entirely. Preference is given to runs that change one parameter and still meet specification, due to simplicity.
+            * The tool returns all admissible conditions for the next run if the prescribed strategy is not sufficient.
             ---
 
             ### 4️⃣ Review Plot & Strategy Selection
