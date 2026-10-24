@@ -15,6 +15,8 @@ from plotly import graph_objects as go
 import random
 from scipy.optimize import linear_sum_assignment
 from types import SimpleNamespace as sns 
+import streamlit.components.v1 as components
+import json
 
 st.set_page_config(
     page_title="HPLC Method Development App",
@@ -286,7 +288,8 @@ class Efficiency:
             'flow_rate': best_candidate['flow_rate'],
             'bp': best_candidate['bp'],
             'tR': best_candidate['tR'],
-            'plates': best_candidate['plates']
+            'plates': best_candidate['plates'],
+            'Rs': best_candidate['predicted_rs']
         }
 
     @staticmethod
@@ -340,8 +343,253 @@ class Efficiency:
 
         return "Flow rate adjustments alone cannot yield sufficient theoretical plates ($N$) to achieve required resolution."
         
-    
+    @staticmethod
+    def handle_efficiency(ignore_parameters: list = []) -> sns:
+        """Evaluates optimization options and registers candidate state for UI rendering in main()."""
 
+        current_L = float(Efficiency._get_safe_last('all_column_lengths', 150.0))
+        current_dp = float(Efficiency._get_safe_last('all_particle_sizes', 5.0))
+        current_spp = bool(Efficiency._get_safe_last('all_coreshells', False))
+        current_F = float(Efficiency._get_safe_last('all_flow_rates', 1.0))
+
+        current_bp = float(Efficiency._get_safe_last('all_backpressures', 1000.0))
+        current_tR = float(Efficiency._get_safe_last('all_run_times', 10.0))
+        current_rs = float(Efficiency._get_safe_last('all_resolutions_final', 1.0))
+        current_N = float(Efficiency._get_safe_last('plates', 10000.0))
+
+        bpspec = float(st.session_state.get('bpspec', 4000.0))
+        runspec = float(st.session_state.get('runspec', 15.0))
+        res_spec = float(st.session_state.get('res_spec', 1.4))
+
+        ret_values = st.session_state.get('all_retention_times', [])
+        if not ret_values or len(ret_values[-1]) == 0:
+            st.warning("No retention time data available for scaling.")
+            return None
+
+        all_tzeros = [tx[0] for tx in ret_values]
+        tzero = float(np.mean(all_tzeros))
+
+        if current_rs >= res_spec and current_tR <= runspec:
+            st.info("Method is fully within specification. No adjustments required!")
+            return None
+
+        u1 = current_L / (tzero * 60.0)
+        spp_factor1 = 1.5 if current_spp else 1.0
+        hetp1 = (1.5 * current_dp + (3.0 / u1) + 0.15 * (current_dp ** 2) * u1) / spp_factor1
+
+        L_grid = [current_L] if 'length' in ignore_parameters else st.session_state.get('available_column_lengths', [50.0, 75.0, 100.0, 150.0, 250.0])
+        dp_grid = [current_dp] if 'particle_size' in ignore_parameters else st.session_state.get('available_particle_sizes', [1.7, 1.8, 2.5, 3.5, 5.0])
+        spp_grid = [current_spp] if 'spp' in ignore_parameters else st.session_state.get('available_spp_states', [False, True])
+        F_grid = [current_F] if 'flow_rate' in ignore_parameters else [float(round(f, 2)) for f in np.arange(0.30, 2.05, 0.05)]
+
+        def evaluate_candidate(L2, dp2, spp2, F2):
+            spp_factor2 = 1.5 if spp2 else 1.0
+            u2 = u1 * (F2 / current_F)
+            if u2 <= 0:
+                return None
+
+            hetp2 = (1.5 * dp2 + (3.0 / u2) + 0.15 * (dp2 ** 2) * u2) / spp_factor2
+            gamma = (L2 / current_L) * (hetp1 / hetp2)
+
+            predicted_rs = current_rs * np.sqrt(gamma)
+            predicted_N = current_N * gamma
+
+            spp_bp_mult = 0.85 if (not current_spp and spp2) else (1.15 if (current_spp and not spp2) else 1.0)
+            predicted_bp = current_bp * (F2 / current_F) * (L2 / current_L) * ((current_dp / dp2) ** 2) * spp_bp_mult
+            predicted_tR = current_tR * (current_F / F2) * (L2 / current_L)
+
+            if predicted_bp <= bpspec and predicted_tR <= runspec and predicted_rs >= res_spec:
+                changes = []
+                equip_type = set()
+
+                if not np.isclose(F2, current_F):
+                    changes.append(f"Flow Rate: {current_F:.2f} -> {F2:.2f} mL/min")
+                    equip_type.add("pump")
+                if not np.isclose(L2, current_L):
+                    changes.append(f"Column Length: {current_L:.0f} -> {L2:.0f} mm")
+                    equip_type.add("column")
+                if not np.isclose(dp2, current_dp):
+                    changes.append(f"Particle Size: {current_dp:.1f} -> {dp2:.1f} µm")
+                    equip_type.add("column")
+                if spp2 != current_spp:
+                    changes.append(f"Particle Type: {'Superficially Porous (SPP)' if spp2 else 'Fully Porous (FPP)'}")
+                    equip_type.add("column")
+
+                tier = len(changes)
+                if tier == 0:
+                    return None
+
+                solvent_used = F2 * predicted_tR
+                hardware_cost = 0.0
+                if "column" in equip_type:
+                    hardware_cost += 50.0 if spp2 == current_spp else 100.0
+
+                if "pump" in equip_type and "column" in equip_type:
+                    equipment_str = "pump and column"
+                elif "pump" in equip_type:
+                    equipment_str = "pump"
+                else:
+                    equipment_str = "column"
+
+                justification = (
+                    f"Consumes {solvent_used:.1f} mL solvent per run ({predicted_tR:.2f} min analysis time). "
+                    f"Hardware investment rating (0-100): ${hardware_cost:.0f}."
+                )
+
+                return {
+                    'L': L2, 'dp': dp2, 'is_spp': spp2, 'flow_rate': F2,
+                    'bp': predicted_bp, 'tR': predicted_tR, 'plates': predicted_N,
+                    'predicted_rs': predicted_rs, 'tier': tier, 'changes': changes,
+                    'equipment': equipment_str, 'solvent_used': solvent_used,
+                    'hardware_cost': hardware_cost, 'justification': justification
+                }
+            return None
+
+        # Gather Tier 1 candidates first
+        tier_1_candidates = []
+        for fn, param_name, attr_name in [
+            (Efficiency.flow_rate, 'flow_rate', 'flow_rate'),
+            (Efficiency.column_length, 'length', 'length'),
+            (Efficiency.particle_size, 'particle_size', 'size'),
+            (Efficiency.spp, 'spp', 'is_spp')
+        ]:
+            if param_name not in ignore_parameters:
+                res = fn()
+                if res is not None:
+                    args = [current_L, current_dp, current_spp, current_F]
+                    if param_name == 'flow_rate': args[3] = res['flow_rate']
+                    elif param_name == 'length': args[0] = res['length']
+                    elif param_name == 'particle_size': args[1] = res['size']
+                    elif param_name == 'spp': args[2] = res['is_spp']
+                    
+                    cand = evaluate_candidate(*args)
+                    if cand:
+                        tier_1_candidates.append(cand)
+
+        selected_candidates = tier_1_candidates
+
+        # Combinatorial search for higher tiers if Tier 1 yields no results
+        if not selected_candidates:
+            candidate_buckets = {2: [], 3: [], 4: []}
+            for L2 in L_grid:
+                for dp2 in dp_grid:
+                    for spp2 in spp_grid:
+                        for F2 in F_grid:
+                            cand = evaluate_candidate(L2, dp2, spp2, F2)
+                            if cand and cand['tier'] in candidate_buckets:
+                                candidate_buckets[cand['tier']].append(cand)
+
+            for tier_level in [2, 3, 4]:
+                if candidate_buckets[tier_level]:
+                    selected_candidates = candidate_buckets[tier_level]
+                    break
+
+        if selected_candidates:
+            # 1. Base sort by efficiency metrics (Lowest solvent, minimum runtime)
+            selected_candidates.sort(key=lambda x: (x['solvent_used'], x['tR']))
+
+            # 2. Get active ligand (case-insensitive & whitespace trimmed)
+            current_ligand = str(Efficiency._get_safe_last('all_ligands', 'C18')).strip().upper()
+            inventory_columns = st.session_state.get('available_columns', [])
+
+            # Helper to check if candidate matches an in-stock column configuration
+            def is_in_possession(cand):
+                for col in inventory_columns:
+                    col_ligand = str(col.get('ligand', 'C18')).strip().upper()
+                    # Approximate/flexible ligand matching (e.g. "C18" in "AQ-C18" or exact substring)
+                    ligand_match = (col_ligand in current_ligand) or (current_ligand in col_ligand)
+                    
+                    if (
+                        np.isclose(col['length'], cand['L']) and
+                        np.isclose(col['dp'], cand['dp']) and
+                        bool(col['is_spp']) == bool(cand['is_spp']) and
+                        ligand_match
+                    ):
+                        return True
+                return False
+
+            # Tag candidates and partition into possession vs. non-possession
+            candidates_in_possession = []
+            candidates_not_in_possession = []
+
+            for cand in selected_candidates:
+                in_stock = is_in_possession(cand)
+                cand['is_in_stock'] = in_stock
+                cand['hardware_cost'] = 0.0 if in_stock else 500.0
+                
+                # Append status tag to justification text
+                tag = " [IN STOCK]" if in_stock else " [PURCHASE NEEDED]"
+                cand['justification'] = f"{cand['justification']} Stock Status:{tag}"
+
+                if in_stock:
+                    candidates_in_possession.append(cand)
+                else:
+                    candidates_not_in_possession.append(cand)
+
+            # 3. Stack in-possession columns directly at the top of the pile
+            st.session_state.efficiency_candidates = candidates_in_possession + candidates_not_in_possession
+            st.session_state.show_efficiency_ui = True
+            return None
+
+        # PRESERVED: Fallback to Selectivity when efficiency cannot resolve deficit
+        st.warning("Efficiency adjustments alone cannot resolve method deficits.")
+        handle_selectivity()
+        return None
+
+
+    @staticmethod
+    def commit_efficiency_selection(selected_candidate: dict):
+        """Updates session state controlled parameters and renders the banner."""
+        static_keys = [
+            'all_solvents', 'all_ligands', 'all_bead_types',
+            'all_pore_sizes', 'all_coreshells', 'all_carbon_loads',
+            'all_column_lengths', 'all_internal_diameters', 'all_particle_sizes',
+            'all_flow_rates', 'all_temperatures', 'all_pct_bs'
+        ]
+
+        def safe_append(key, val):
+            if key not in st.session_state or not isinstance(st.session_state[key], list):
+                st.session_state[key] = []
+            st.session_state[key].append(val)
+
+        modified_parameters = []
+
+        # Modify explicitly changed controlled keys
+        safe_append('all_flow_rates', selected_candidate['flow_rate'])
+        modified_parameters.append('all_flow_rates')
+
+        safe_append('all_column_lengths', selected_candidate['L'])
+        modified_parameters.append('all_column_lengths')
+
+        safe_append('all_particle_sizes', selected_candidate['dp'])
+        modified_parameters.append('all_particle_sizes')
+
+        safe_append('all_coreshells', selected_candidate['is_spp'])
+        modified_parameters.append('all_coreshells')
+
+        # Replicate unmodified static controlled keys
+        for key in static_keys:
+            if key not in modified_parameters:
+                if key in st.session_state and isinstance(st.session_state[key], list) and st.session_state[key]:
+                    st.session_state[key].append(st.session_state[key][-1])
+
+        # Render diagnostic banner
+        changes_str = "; ".join(selected_candidate['changes'])
+        st.info(
+            f"**Next Run Conditions (Cycle: Efficiency)**\n\n"
+            f"- **Equipment Required:** {selected_candidate['equipment'].capitalize()}\n"
+            f"- **Adjustments:** {changes_str}\n\n"
+            f"**Projected Target Metrics:**\n"
+            f"- Resolution ($R_s$): **{selected_candidate['predicted_rs']:.2f}**\n"
+            f"- Run Time ($t_R$): **{selected_candidate['tR']:.2f} min**\n"
+            f"- Backpressure ($P$): **{selected_candidate['bp']:.1f} psi**\n"
+            f"- Solvent Consumption: **{selected_candidate['solvent_used']:.1f} mL**"
+        )
+        st.success("Successfully committed efficiency conditions to session state!")
+
+        # Close UI block and clean candidate state
+        st.session_state.show_efficiency_ui = False
+        st.session_state.efficiency_candidates = []
 
 
     
@@ -653,6 +901,7 @@ def evaluate_next_run_conditions(peakspec, runspec, res_spec, bpspec):
             handle_selectivity(prev_b=False)
 
     # --- 4. Target Peak Count Met (Matrix Evaluation) ---
+    # --- 4. Target Peak Count Met (Matrix Evaluation) ---
     elif latest_peaks == peakspec:
         tR_far_below = latest_runtime < (0.5 * runspec)
         tR_below = (latest_runtime < runspec) and not tR_far_below
@@ -662,20 +911,69 @@ def evaluate_next_run_conditions(peakspec, runspec, res_spec, bpspec):
         rs_below_floor = Efficiency.is_Rs_below_floor()
 
         if pass_resolution:
-            st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $R_s$ ({latest_resolution:.2f}) >= Spec ({res_spec})")
+            run_metrics = (
+                f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) "
+                f"| $R_s$ ({latest_resolution:.2f}) >= Spec ({res_spec}) "
+                f"| Runtime ({latest_runtime:.2f}) "
+            )
             if tR_far_below or tR_below:
-                st.success("🎉 **Method MET!** Optionally increase Flow Rate ($F$) to shorten the run time further.\n\n*Controlled by:* Pump | *Cycle:* Efficiency (N)")
+                if tR_far_below:
+                    run_metrics += '<< Spec'
+                else:
+                    run_metrics += '< Spec'
+                st.caption(run_metrics)
+                st.success(
+                    "🎉 **Method MET!** Target peak count, resolution, and analysis time specification are all achieved.\n\n"
+                    "*(Optionally increase Flow Rate ($F$) to shorten run time further. Controlled by: Pump | Cycle: Efficiency (N))*"
+                )
                 update_session_state_keys()
+
             elif tR_above:
-                res = Efficiency.flow_rate()
-                display_strategy_and_update("Increase Flow Rate (F) to shorten run time", res, controller_text="Pump")
+                new_f = Efficiency.flow_rate()
+                excerpt = ''
+                if new_f is not None:
+                    excerpt = (
+                        f" Increasing flow rate ($F$) directly reduces linear linear velocity residence time via $t_0 = V_m / F$, "
+                        f"shortening analysis time without altering chromatographic thermodynamics.\n"
+                        f"Expected next run conditions: $F$ = {new_f['flow_rate']:.2f} mL/min.\n"
+                        f"Predicted Metrics -> $R_s$: {new_f['rs']:.2f} | $N$: {new_f['plates']:.0f} | "
+                        f"Runtime: {new_f['tR']:.2f} min | Pressure: {new_f['bp']:.0f} psi\n"
+                        f"Cycle: Efficiency | Equipment: Pump"
+                    )
+                else:
+                    excerpt = " However, increasing flow rate alone cannot meet runtime without exceeding backpressure limits ($P \\propto F$). Tool has automatically escalated to candidate combinations."
+
+                st.info(f"Prescribed Strategy: Increase Flow Rate ($F$) to shorten run time.{excerpt}")
+                run_metrics += '> Spec'
+                st.caption(run_metrics)
+                if 'However' in excerpt:
+                    Efficiency.handle_efficiency()
 
         else:
+            # =========================================================================
+            # CASE A: RUNTIME FAR BELOW SPEC (tR << Spec) & RESOLUTION DEFICIT
+            # =========================================================================
             if tR_far_below:
                 if rs_below_floor:
                     st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ << Spec | $R_s$ below floor")
                     res = Efficiency.column_length()
-                    display_strategy_and_update("Increase Column Length (L)", res, controller_text="Column")
+                    excerpt = ''
+                    if res is not None:
+                        excerpt = (
+                            f" Severe resolution deficit ($R_s < 0.5$) requires a major increase in plate count ($N \\propto L$). "
+                            f"Since runtime is far below specification ($t_R < 0.5 \\times t_{{R,\\text{{spec}}}}$), increasing column length ($L$) provides "
+                            f"the necessary efficiency gains while keeping $t_R$ safely within bounds.\n"
+                            f"Predicted Metrics -> $L$: {res['length']:.0f} mm | $R_s$: {res['rs']:.2f} | $N$: {res['plates']:.0f} | "
+                            f"Runtime: {res['tR']:.2f} min | Pressure: {res['bp']:.0f} psi\n"
+                            f"Cycle: Efficiency | Equipment: Column"
+                        )
+                    else:
+                        excerpt = " However, increasing column length alone is insufficient or exceeds system backpressure limits ($P \\propto L$). Tool has automatically escalated to candidate combinations."
+
+                    st.info(f"Prescribed Strategy: Increase Column Length ($L$) to boost efficiency ($N$).{excerpt}")
+                    if 'However' in excerpt:
+                        Efficiency.handle_efficiency()
+
                 else:
                     st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ << Spec | Floor < $R_s$ < Spec")
                     candidates = [
@@ -686,11 +984,34 @@ def evaluate_next_run_conditions(peakspec, runspec, res_spec, bpspec):
                     ]
                     valid = [c for c in candidates if c is not None]
                     best = min(valid, key=lambda x: x['tR']) if valid else None
-                    display_strategy_and_update("Increase L OR decrease F OR decrease PS OR switch to SPP", best, controller_text="Column / Pump")
+                    excerpt = ''
+                    if best is not None:
+                        excerpt = (
+                            f" Moderate resolution deficit with significant runtime budget available ($t_R < 0.5 \\times t_{{R,\\text{{spec}}}}$). "
+                            f"Multiple single-parameter options exist ($L \\uparrow$, $F \\downarrow$, $d_p \\downarrow$, or Core-Shell SPP).\n"
+                            f"Optimal single adjustment selected: {best.get('description', 'Efficiency Parameter Adjustment')}.\n"
+                            f"Predicted Metrics -> $R_s$: {best['rs']:.2f} | $N$: {best['plates']:.0f} | "
+                            f"Runtime: {best['tR']:.2f} min | Pressure: {best['bp']:.0f} psi\n"
+                            f"Cycle: Efficiency | Equipment: {best.get('equipment', 'Column/Pump').capitalize()}"
+                        )
+                    else:
+                        excerpt = " However, no single-parameter adjustment satisfies both $R_s$ and pressure limits simultaneously. Tool has automatically escalated to candidate combinations."
 
+                    st.info(f"Prescribed Strategy: Increase $L$, decrease $F$, decrease $d_p$, or switch to SPP.{excerpt}")
+                    if 'However' in excerpt:
+                        Efficiency.handle_efficiency()
+
+            # =========================================================================
+            # CASE B: RUNTIME BELOW SPEC (tR < Spec) & RESOLUTION DEFICIT
+            # =========================================================================
             elif tR_below:
                 if rs_below_floor:
                     st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ < Spec | $R_s$ below floor -> Triggering Selectivity.")
+                    st.warning(
+                        "⚠️ **Resolution is below the hard efficiency floor ($R_s < 0.5$) with tight runtime remaining.**\n\n"
+                        "Gaining sufficient resolution through efficiency alone requires $N \\propto R_s^2$ (a $4\\times$ plate increase for $2\\times$ $R_s$), "
+                        "which would breach the runtime specification. **Escalating directly to Selectivity (α) Cycle** to shift retention order."
+                    )
                     handle_selectivity(prev_b=False)
                 else:
                     st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ < Spec | Floor < $R_s$ < Spec")
@@ -701,16 +1022,63 @@ def evaluate_next_run_conditions(peakspec, runspec, res_spec, bpspec):
                     ]
                     valid = [c for c in candidates if c is not None]
                     best = min(valid, key=lambda x: x['tR']) if valid else None
-                    display_strategy_and_update("Decrease F OR decrease PS OR switch to SPP", best, controller_text="Pump / Column")
+                    excerpt = ''
+                    if best is not None:
+                        excerpt = (
+                            f" Moderate resolution deficit with modest runtime margin. Decreasing flow rate ($F$), reducing particle size ($d_p$), "
+                            f"or switching to Core-Shell (SPP) technology sharpens efficiency without the severe runtime penalty of increasing column length.\n"
+                            f"Optimal single adjustment selected: {best.get('description', 'Efficiency Parameter Adjustment')}.\n"
+                            f"Predicted Metrics -> $R_s$: {best['rs']:.2f} | $N$: {best['plates']:.0f} | "
+                            f"Runtime: {best['tR']:.2f} min | Pressure: {best['bp']:.0f} psi\n"
+                            f"Cycle: Efficiency | Equipment: {best.get('equipment', 'Pump/Column').capitalize()}"
+                        )
+                    else:
+                        excerpt = " However, single adjustments cannot bridge the resolution gap within the remaining runtime budget. Tool has automatically escalated to candidate combinations."
 
+                    st.info(f"Prescribed Strategy: Decrease $F$, decrease $d_p$, or switch to SPP.{excerpt}")
+                    if 'However' in excerpt:
+                        Efficiency.handle_efficiency()
+
+            # =========================================================================
+            # CASE C: RUNTIME ABOVE SPEC (tR > Spec) & RESOLUTION DEFICIT
+            # =========================================================================
             elif tR_above:
                 if rs_below_floor:
                     st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ > Spec | $R_s$ below floor -> Triggering Selectivity.")
+                    st.warning(
+                        "⚠️ **Method exceeds runtime specification ($t_R > t_{{R,\\text{{spec}}}}$) AND resolution is below floor ($R_s < 0.5$).**\n\n"
+                        "Increasing column length or lowering flow rate to gain efficiency would exacerbate the runtime defect. "
+                        "**Escalating directly to Selectivity (α) Cycle** to resolve the critical peak pair chemically."
+                    )
                     handle_selectivity(prev_b=False)
                 else:
                     st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ > Spec | Floor < $R_s$ < Spec")
-                    res = Efficiency.flow_rate()
-                    display_strategy_and_update("Decrease Particle Size (PS), then adjust Flow Rate (F)", res, controller_text="Column / Pump")
+                    res_dp = Efficiency.particle_size()
+                    res_f = Efficiency.flow_rate()
+                    
+                    excerpt = ''
+                    if res_dp is not None:
+                        excerpt = (
+                            f" Decreasing particle size ($d_p$) significantly increases plate number ($N \\propto 1/d_p$) "
+                            f"and lowers reduced plate height ($h$), enabling faster flow rates ($F \\uparrow$) without loss of efficiency.\n"
+                            f"Predicted Metrics -> $d_p$: {res_dp['size']:.1f} µm | $R_s$: {res_dp['rs']:.2f} | $N$: {res_dp['plates']:.0f} | "
+                            f"Runtime: {res_dp['tR']:.2f} min | Pressure: {res_dp['bp']:.0f} psi\n"
+                            f"Cycle: Efficiency | Equipment: Column / Pump"
+                        )
+                    elif res_f is not None:
+                        excerpt = (
+                            f" Adjusting flow rate ($F$) re-optimizes linear velocity ($u$) along the Van Deemter curve, "
+                            f"balancing plate count against runtime.\n"
+                            f"Predicted Metrics -> $F$: {res_f['flow_rate']:.2f} mL/min | $R_s$: {res_f['rs']:.2f} | $N$: {res_f['plates']:.0f} | "
+                            f"Runtime: {res_f['tR']:.2f} min | Pressure: {res_f['bp']:.0f} psi\n"
+                            f"Cycle: Efficiency | Equipment: Pump"
+                        )
+                    else:
+                        excerpt = " However, single-parameter changes cannot simultaneously shorten analysis time and recover resolution. Tool has automatically escalated to candidate combinations."
+
+                    st.info(f"Prescribed Strategy: Decrease Particle Size ($d_p$), then adjust Flow Rate ($F$).{excerpt}")
+                    if 'However' in excerpt:
+                        Efficiency.handle_efficiency()
 
 def generate_selectivity_plot():
     """Generates a simplified Plotly graph using stored slopes, intercepts, and R^2 values."""
@@ -2019,6 +2387,7 @@ def main():
         if len(st.session_state.all_csvs) == 0:
             st.info("No files have been parsed yet. Upload a CSV to view extracted data.")
         else:
+            print(dict(st.session_state).keys())
             # Display the stored lists directly as raw session state values
             st.write("**Peak Counts:**", st.session_state.all_peak_counts)
             st.write("**Run Times:**", st.session_state.all_run_times)
@@ -2041,153 +2410,63 @@ def main():
                 "backpressures": st.session_state.all_backpressures,
                 "percent bs": st.session_state.all_pct_bs
             })
+            if st.button('View raw session state'):
+                st.json(st.session_state)
     
-    # Processing of decisions
-    if st.button('Request decision again, if not acquired after uploading.'):
-        # Guard check: Ensure at least one run has been uploaded and parsed
-        if not st.session_state.all_backpressures:
-            st.error("No run data found. Please upload a CSV run file first.")
-        else:
-            latest_bp = st.session_state.all_backpressures[-1]
-            latest_peaks = st.session_state.all_peak_counts[-1]
-            latest_runtime = st.session_state.all_run_times[-1]
-            latest_resolution = st.session_state.all_resolutions_final[-1]
-            run_count = len(st.session_state.all_backpressures)
-            
-            # 1. Backpressure Check
-            if latest_bp > bpspec:
-                st.caption(f"📊 **Run Metrics:** Backpressure ({latest_bp:.1f} bar) > Spec ({bpspec:.1f} bar) | Peaks: {latest_peaks}/{peakspec}")
-                st.warning(f'Run number {run_count} exceeded backpressure limit!')
-                st.session_state.show_decision_radio = False
-                
-            # 2. Peak Count Checks
-            elif latest_peaks > peakspec:
-                st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) > Spec ({peakspec}) | $t_R$: {latest_runtime:.1f} min | $R_s$: {latest_resolution:.2f}")
-                st.warning(f'Run number {run_count} has more peaks than expected. Investigate for contamination.')
-                st.session_state.show_decision_radio = False
-                
-            elif latest_peaks < peakspec:
-                # 3a. Fast Run / Fixed Step
-                if latest_runtime < (0.5 * runspec):
-                    st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) < Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) << Spec ({runspec} min) | $R_s$: {latest_resolution:.2f}")
-                    current_pct_b = st.session_state.all_pct_bs[-1]
-                    new_pct_b = current_pct_b - 10.0
                     
-                    st.info(
-                        f"**Next Run Strategy:** Decrease %B by 10% (from {current_pct_b}% to {new_pct_b}%)\n\n"
-                        f"*Controlled by:* Pump | *Cycle:* Retention"
-                    )
-                    
-                    st.session_state.all_pct_bs.append(new_pct_b)
-                    
-                    static_keys = [
-                        'all_solvents', 
-                        'all_ligands', 
-                        'all_bead_types',
-                        'all_pore_sizes', 
-                        'all_coreshells', 
-                        'all_carbon_loads',
-                        'all_column_lengths',      # Added missing key
-                        'all_internal_diameters', 
-                        'all_particle_sizes',
-                        'all_flow_rates', 
-                        'all_temperatures'
-                    ]
 
-                    # Propagate static chromatographic parameters to the next run
-                    for key in static_keys:
-                        st.session_state[key].append(st.session_state[key][-1])
-                    st.session_state.show_decision_radio = False
+    # In your main script where handle_efficiency is triggered:
 
-                # 3b. Optimization Decision Trigger
-                elif latest_runtime < runspec:
-                    if not st.session_state.minbdone:
-                        st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) < Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) < Spec ({runspec} min) | $R_s$: {latest_resolution:.2f}")
-                        st.session_state.choice1 = min_b(runspec)
-                        st.session_state.choice2 = int_pct_b()
-                        st.session_state.minbdone = True
-                        st.session_state.show_decision_radio = True
-                    else:
-                        st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) < Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) < Spec ({runspec} min) | $R_s$: {latest_resolution:.2f}")
-                        handle_selectivity()
-                
-                elif latest_runtime > runspec:
-                    st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) < Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) > Spec ({runspec} min) | $R_s$: {latest_resolution:.2f}")
-                    # Where runtime above spec, and less than spec peaks, return to previous %B and change selectivity.
-                    handle_selectivity(True)
-            
-                elif latest_peaks == peakspec:
-                    # 1. Define criteria thresholds
-                    tR_far_below = latest_runtime < (0.5 * runspec)  # tR << spec
-                    tR_below = latest_runtime < runspec and not tR_far_below  # tR < spec
-                    tR_above = latest_runtime > runspec  # tR > spec
-                    
-                    pass_resolution = latest_resolution >= res_spec  # Rs > spec
+    # Initialize persistent UI visibility and candidate state flags
+    if "show_efficiency_ui" not in st.session_state:
+        st.session_state.show_efficiency_ui = False
+    if "efficiency_candidates" not in st.session_state:
+        st.session_state.efficiency_candidates = []
 
-                    static_keys = [
-                        'all_solvents', 'all_ligands', 'all_bead_types',
-                        'all_pore_sizes', 'all_pct_bs', 'all_coreshells', 
-                        'all_carbon_loads', 'all_column_lengths', 
-                        'all_internal_diameters', 'all_particle_sizes',
-                        'all_flow_rates', 'all_temperatures'
-                    ]
+    # Persistent UI Block: Executes directly in main()
+    if st.session_state.show_efficiency_ui and st.session_state.efficiency_candidates:
+        candidates = st.session_state.efficiency_candidates
 
-                    # ------------------------------------------------------------------
-                    # GROUP 1: tR << spec
-                    # ------------------------------------------------------------------
-                    if tR_far_below:
-                        if pass_resolution:
-                            st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) << Spec ({runspec} min) | $R_s$ ({latest_resolution:.2f}) >= Spec ({res_spec})")
-                            st.success(
-                                "🎉 **Method MET!** Optionally increase Flow Rate ($F$) to shorten the run time further.\n\n"
-                                "*Cycle:* Efficiency (N)"
-                            )
-                        else:
-                            st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) << Spec ({runspec} min) | $R_s$ ({latest_resolution:.2f}) < Spec ({res_spec})")
-                            st.info(
-                                "**Next Run Strategy:** Increase Column Length ($L$) (watch BP) OR decrease Flow Rate ($F$) OR decrease Particle Size ($dp$) (watch BP) OR switch to Core-Shell (SPP).\n\n"
-                                "*Controlled by:* Column / Pump | *Cycle:* Efficiency (N)"
-                            )
+        # Single Candidate Auto-Commit
+        if len(candidates) == 1:
+            Efficiency.commit_efficiency_selection(candidates[0])
+            st.rerun()
 
-                    # ------------------------------------------------------------------
-                    # GROUP 2: tR < spec
-                    # ------------------------------------------------------------------
-                    elif tR_below:
-                        if pass_resolution:
-                            st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) < Spec ({runspec} min) | $R_s$ ({latest_resolution:.2f}) >= Spec ({res_spec})")
-                            st.success(
-                                "🎉 **Method MET!** Optionally increase Flow Rate ($F$) to shorten the run time further.\n\n"
-                                "*Cycle:* Efficiency (N)"
-                            )
-                        else:
-                            st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) < Spec ({runspec} min) | $R_s$ ({latest_resolution:.2f}) < Spec ({res_spec})")
-                            st.info(
-                                "**Next Run Strategy:** Decrease Flow Rate ($F$) OR decrease Particle Size ($dp$) (watch BP) OR switch to Core-Shell (SPP).\n\n"
-                                "*Controlled by:* Pump / Column | *Cycle:* Efficiency (N)"
-                            )
+        # Multi-Candidate Selection UI
+        st.markdown("### ⚙️ **Select Next Run Conditions**")
+        st.write(f"Identified **{len(candidates)} valid optimization options**:")
 
-                    # ------------------------------------------------------------------
-                    # GROUP 3: tR > spec
-                    # ------------------------------------------------------------------
-                    elif tR_above:
-                        if pass_resolution:
-                            st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) > Spec ({runspec} min) | $R_s$ ({latest_resolution:.2f}) >= Spec ({res_spec})")
-                            st.info(
-                                "**Next Run Strategy:** Increase Flow Rate ($F$) to shorten the run time.\n\n"
-                                "*Controlled by:* Pump | *Cycle:* Efficiency (N)"
-                            )
-                        else:
-                            st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ ({latest_runtime:.1f} min) > Spec ({runspec} min) | $R_s$ ({latest_resolution:.2f}) < Spec ({res_spec})")
-                            st.info(
-                                "**Next Run Strategy:** Decrease Particle Size ($dp$) (watch BP), then increase Flow Rate ($F$) to shorten the run time.\n\n"
-                                "*Controlled by:* Column / Pump | *Cycle:* Efficiency (N)"
-                            )
+        options_map = {}
+        for i, c in enumerate(candidates):
+            label = (
+                f"Option {i+1}: {', '.join(c['changes'])} | "
+                f"tR: {c['tR']:.2f} min | "
+                f"Rs: {c['predicted_rs']:.2f} | "
+                f"BP: {c['bp']:.0f} psi | "
+                f"Solvent: {c['solvent_used']:.1f} mL"
+            )
+            options_map[label] = c
 
-                    # Propagate static chromatographic parameters to the next run
-                    for key in static_keys:
-                        st.session_state[key].append(st.session_state[key][-1])
-                    st.session_state.show_decision_radio = False
-                    
+        pills_key = "eff_pills_main_selection"
+        if pills_key not in st.session_state:
+            st.session_state[pills_key] = list(options_map.keys())[0]
+
+        selected_label = st.pills(
+            label="Choose optimization strategy:",
+            options=list(options_map.keys()),
+            selection_mode="single",
+            key=pills_key
+        )
+
+        if not selected_label or selected_label not in options_map:
+            selected_label = list(options_map.keys())[0]
+
+        active_cand = options_map[selected_label]
+        st.caption(f"💡 **Economic Justification:** {active_cand['justification']}")
+
+        if st.button("Confirm Selected Strategy", type="primary"):
+            Efficiency.commit_efficiency_selection(active_cand)
+            st.rerun()
 
     # Persistent Decision Radio Block (outside st.button to maintain state)
     if st.session_state.get('show_decision_radio', False):
