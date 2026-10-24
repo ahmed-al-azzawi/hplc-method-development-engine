@@ -11,7 +11,10 @@ APP_REQUIREMENTS:
   - plotly
 
 APP_FILES:
-  - engine.py
+  - Engine.py
+  # Pages Directory
+  - pages/Edit Column Inventory.py
+  - pages/View Flow Chart.py
   # Equipment Monograph Images
   - assets/manual_injector.png
   - assets/uhplc.png
