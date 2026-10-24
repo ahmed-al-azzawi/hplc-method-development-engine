@@ -30,7 +30,71 @@ st.session_state.tr_intercept = 0
 st.session_state.tr_tzero = 0
 
 
+def render_next_run_conditions_preview():
+    """Displays a persistent, pre-filled preview card showing all committed 
 
+    next-run parameters across Efficiency, Retention, and Selectivity cycles.
+    """
+    with st.expander('View Next Run Conditions'):
+        st.text(
+            'The next run\'s conditions are already saved in the session state. The user is not required to type them.'
+            '\n You can view them here.'
+        )
+        # Verify that a next run has been committed (more parameter entries than executed runs)
+        flow_rates = st.session_state.get('all_flow_rates', [])
+        peak_counts = st.session_state.get('all_peak_counts', [])
+
+        if len(flow_rates) > len(peak_counts) and len(flow_rates) > 0:
+            # Safe extraction helper for last element
+            def get_last(key, default="N/A"):
+                arr = st.session_state.get(key, [])
+                return arr[-1] if isinstance(arr, list) and len(arr) > 0 else default
+
+            # 1. Efficiency Parameters
+            next_L = get_last('all_column_lengths', 150.0)
+            next_dp = get_last('all_particle_sizes', 5.0)
+            next_is_spp = get_last('all_coreshells', False)
+            next_spp_str = "Core-Shell (SPP)" if next_is_spp else "Fully Porous (FPP)"
+            next_F = get_last('all_flow_rates', 1.0)
+            next_id = get_last('all_internal_diameters', 4.6)
+
+            # 2. Retention & Selectivity Parameters
+            next_solvent = get_last('all_solvents', 'Acetonitrile')
+            next_pct_b = get_last('all_pct_bs', 50.0)
+            next_ligand = get_last('all_ligands', 'C18')
+            next_temp = get_last('all_temperatures', 30.0)
+            next_pore = get_last('all_pore_sizes', 100.0)
+
+            # Card Container
+            with st.container(border=True):
+                st.markdown("### 📋 **Next Run Pre-Filled Conditions**")
+                st.success("✅ **Conditions are already saved in the session state.**")
+                st.caption(
+                    "💡 *When a new file is uploaded, these conditions will automatically fill in the historical row.*"
+                )
+                st.divider()
+
+                col1, col2 = st.columns(2)
+
+                with col1:
+                    st.markdown("#### ⚡ **Efficiency & Hardware**")
+                    st.markdown(
+                        f"- **Column Length ($L$):** `{next_L:.0f} mm`\n"
+                        f"- **Particle Size ($d_p$):** `{next_dp:.1f} µm`\n"
+                        f"- **Particle Tech:** `{next_spp_str}`\n"
+                        f"- **Internal Diameter:** `{next_id:.1f} mm`\n"
+                        f"- **Flow Rate ($F$):** `{next_F:.2f} mL/min`"
+                    )
+
+                with col2:
+                    st.markdown("#### 🧪 **Retention & Selectivity**")
+                    st.markdown(
+                        f"- **Mobile Phase Solvent:** `{next_solvent}`\n"
+                        f"- **Organic Modifier (%B):** `{next_pct_b:.1f}%`\n"
+                        f"- **Stationary Phase Ligand:** `{next_ligand}`\n"
+                        f"- **Column Temperature ($T$):** `{next_temp} °C`\n"
+                        f"- **Pore Size:** `{next_pore:.0f} Å`"
+                    )
 
 
 class Efficiency:
@@ -180,7 +244,7 @@ class Efficiency:
         current_bp = Efficiency._get_safe_last('all_backpressures', 1000.0)
         current_tR = Efficiency._get_safe_last('all_run_times', 10.0)
         current_N = Efficiency._get_safe_last('plates', 10000)
-        current_is_spp = Efficiency._get_safe_last('is_spp_list', False)
+        current_is_spp = Efficiency._get_safe_last('all_coreshells', False)
 
         if current_is_spp:
             return None
@@ -210,7 +274,7 @@ class Efficiency:
         current_tR = Efficiency._get_safe_last('all_run_times', 10.0)
         current_length = Efficiency._get_safe_last('all_column_lengths', 150.0)
         current_dp = Efficiency._get_safe_last('all_particle_sizes', 5.0)
-        current_is_spp = Efficiency._get_safe_last('is_spp_list', False)
+        current_is_spp = Efficiency._get_safe_last('all_coreshells', False)
         current_rs = Efficiency._get_safe_last('all_resolutions_final', 1.0)
         current_N = Efficiency._get_safe_last('plates', 10000.0)
         
@@ -294,40 +358,69 @@ class Efficiency:
 
     @staticmethod
     def calculate_rs_floor() -> dict:
-        current_bp = Efficiency._get_safe_last('all_backpressures', 1000.0)
-        current_tR = Efficiency._get_safe_last('all_run_times', 10.0)
-        current_L = Efficiency._get_safe_last('all_column_lengths', 150.0)
-        current_PS = Efficiency._get_safe_last('all_particle_sizes', 5.0)
-        current_N = Efficiency._get_safe_last('plates', 10000)
-        
-        bpspec = st.session_state.get('bpspec', 5000.0)
-        runspec = st.session_state.get('runspec', 30.0)
-        res_spec = st.session_state.get('res_spec', 1.5)
+        """Calculates absolute resolution floors matching baseline FPP vs SPP headroom."""
+        current_bp = float(Efficiency._get_safe_last('all_backpressures', 1000.0))
+        current_tR = float(Efficiency._get_safe_last('all_run_times', 10.0))
+        current_L = float(Efficiency._get_safe_last('all_column_lengths', 150.0))
+        current_PS = float(Efficiency._get_safe_last('all_particle_sizes', 5.0))
+        current_dp = current_PS
 
+        ret_values = st.session_state.get('all_retention_times', [])
+        if not ret_values or len(ret_values[-1]) == 0:
+            st.warning("No retention time data available for scaling.")
+            return None
+
+        all_tzeros = [tx[0] for tx in ret_values]
+        tzero = float(np.mean(all_tzeros))
+
+        # 1. Linear velocity u1 in mm/s
+        u1 = current_L / (tzero * 60.0) if tzero > 0 else 0.0
+
+        # 2. Baseline HETP and N_H_calc strictly for FPP (spp_factor = 1.0)
+        hetp1_fpp = (1.5 * current_dp + (3.0 / u1) + 0.15 * (current_dp ** 2) * u1) if u1 > 0 else 1.0
+        N_H_calc_fpp = (current_L * 1000.0) / hetp1_fpp
+
+        bpspec = float(st.session_state.get('bpspec', 5000.0))
+        runspec = float(st.session_state.get('runspec', 30.0))
+        res_spec = float(st.session_state.get('res_spec', 1.5))
+
+        # 3. Operational Headroom (HR)
         hr = np.sqrt((bpspec / current_bp) * (runspec / current_tR)) if (current_bp > 0 and current_tR > 0) else 1.0
+
+        # 4. Van Deemter minimum reduced plate height factor: h_min = A + 2*sqrt(B*C) ~ 3.042
         van_deemter_min_h_factor = 1.5 + 2.0 * np.sqrt(3.0 * 0.15)
 
+        # 5. Theoretical maximum plate counts (Nmax)
         n_max_fpp = (1000.0 * current_L * hr) / (current_PS * van_deemter_min_h_factor)
         n_max_spp = n_max_fpp * 1.5
 
-        rs_floor_fpp = res_spec * np.sqrt(current_N / n_max_fpp) if n_max_fpp > 0 else res_spec
-        rs_floor_spp = res_spec * np.sqrt(current_N / n_max_spp) if n_max_spp > 0 else res_spec
+        # 6. Resolution Floors
+        rs_floor_fpp = res_spec * np.sqrt(N_H_calc_fpp / n_max_fpp) if n_max_fpp > 0 else res_spec
+        rs_floor_spp = res_spec * np.sqrt(N_H_calc_fpp / n_max_spp) if n_max_spp > 0 else res_spec
+
+
+        print(f'FPP: {rs_floor_fpp}')
+        print(f'SPP: {rs_floor_spp}')
 
         return {
             'headroom': float(hr),
+            'hetp_fpp': float(hetp1_fpp),
+            'n_h_calc_fpp': float(N_H_calc_fpp),
             'n_max_fpp': float(n_max_fpp),
             'n_max_spp': float(n_max_spp),
             'rs_floor_fpp': float(rs_floor_fpp),
             'rs_floor_spp': float(rs_floor_spp)
         }
 
+
     @staticmethod
     def is_Rs_below_floor() -> bool:
         current_rs = Efficiency._get_safe_last('all_resolutions_final', 0.0)
-        current_is_spp = Efficiency._get_safe_last('is_spp_list', False)
+        current_is_spp = Efficiency._get_safe_last('all_coreshells', False)
         
         floors = Efficiency.calculate_rs_floor()
-        active_floor = floors['rs_floor_spp'] if current_is_spp else floors['rs_floor_fpp']
+        active_floor = floors['rs_floor_spp'] if not current_is_spp else floors['rs_floor_fpp']
+        print(f'Rs Floor is {active_floor}')
 
         return current_rs < active_floor
 
@@ -745,7 +838,7 @@ def evaluate_next_run_conditions(peakspec, runspec, res_spec, bpspec):
     Guarantees proposed values (F, L, dp, SPP) are displayed and appended to session_state arrays.
     """
     required_state_keys = [
-        'plates', 'heights', 'required_plates_history', 'is_spp_list',
+        'plates', 'heights', 'required_plates_history', 'all_coreshells',
         'all_backpressures', 'all_peak_counts', 'all_run_times',
         'all_resolutions_final', 'all_equilibrated', 'all_column_lengths',
         'all_particle_sizes', 'all_flow_rates', 'all_internal_diameters',
@@ -941,8 +1034,8 @@ def evaluate_next_run_conditions(peakspec, runspec, res_spec, bpspec):
                         f"Cycle: Efficiency | Equipment: Pump"
                     )
                 else:
-                    excerpt = " However, increasing flow rate alone cannot meet runtime without exceeding backpressure limits ($P \\propto F$). Tool has automatically escalated to candidate combinations."
-
+                    reason = Efficiency.diagnose_flow_failure() if hasattr(Efficiency, 'diagnose_flow_failure') else "flow rate limits alone cannot meet specifications"
+                    excerpt = f" However, {reason[0:1].lower()+reason[1:]} Tool has automatically escalated to candidate combinations."
                 st.info(f"Prescribed Strategy: Increase Flow Rate ($F$) to shorten run time.{excerpt}")
                 run_metrics += '> Spec'
                 st.caption(run_metrics)
@@ -2220,7 +2313,11 @@ def main():
         st.session_state.all_flow_rates.append(flow_ratef)
         st.session_state.all_temperatures.append(tempf)
 
+    if 'submitted_specs' not in st.session_state:
+        st.session_state['submitted_specs'] = False
+
     if st.button('Submit specifications.'):
+        st.session_state.submitted_specs = True
         st.session_state.peakspec = peakspec
         st.session_state.runspec = runspec
         st.session_state.res_spec = res_spec
@@ -2228,6 +2325,9 @@ def main():
     # Tracker set to prevent re-parsing on every Streamlit page re-render
     if 'processed_file_ids' not in st.session_state:
         st.session_state.processed_file_ids = set()
+
+    # Run Conditions Reminder
+    render_next_run_conditions_preview()
   
     # 2. Uploading & Single-Execution Processing
     added_file = st.file_uploader('Upload a CSV file of your run.', type='csv', key="main_run_uploader")
@@ -2238,6 +2338,12 @@ def main():
         
         # Process ONLY if this specific upload hasn't been parsed yet
         if file_id not in st.session_state.processed_file_ids:
+            # Barrier for misuse (Specs not submitted)
+            if not st.session_state.submitted_specs:
+                st.session_state.peakspec = peakspec
+                st.session_state.runspec = runspec
+                st.session_state.res_spec = res_spec
+                st.session_state.bpspec = bpspec
             try:
                 dataframe_added = safe_read(added_file)
                 efficiency_data = Efficiency.find_efficiency(dataframe_added)
@@ -2439,27 +2545,22 @@ def main():
         options_map = {}
         for i, c in enumerate(candidates):
             label = (
-                f"Option {i+1}: {', '.join(c['changes'])} | "
-                f"tR: {c['tR']:.2f} min | "
-                f"Rs: {c['predicted_rs']:.2f} | "
-                f"BP: {c['bp']:.0f} psi | "
-                f"Solvent: {c['solvent_used']:.1f} mL"
+                f"Option {i+1}: {', '.join(c['changes'])}\n"
+                f"⏱️ tR: {c['tR']:.2f} min | "
+                f"🎯 Rs: {c['predicted_rs']:.2f} | "
+                f"⚡ BP: {c['bp']:.0f} psi | "
+                f"🧪 Solvent: {c['solvent_used']:.1f} mL"
             )
             options_map[label] = c
 
-        pills_key = "eff_pills_main_selection"
-        if pills_key not in st.session_state:
-            st.session_state[pills_key] = list(options_map.keys())[0]
+        radio_key = "eff_radio_main_selection"
 
-        selected_label = st.pills(
+        selected_label = st.radio(
             label="Choose optimization strategy:",
             options=list(options_map.keys()),
-            selection_mode="single",
-            key=pills_key
+            index=0,
+            key=radio_key
         )
-
-        if not selected_label or selected_label not in options_map:
-            selected_label = list(options_map.keys())[0]
 
         active_cand = options_map[selected_label]
         st.caption(f"💡 **Economic Justification:** {active_cand['justification']}")
