@@ -1,5 +1,5 @@
 APP_NAME: "HPLC Method Development App"
-APP_ENTRYPOINT: "engine.py"
+APP_ENTRYPOINT: "Engine.py"
 CONFIG: false
 
 APP_REQUIREMENTS:
