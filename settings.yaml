@@ -15,6 +15,7 @@ APP_FILES:
   # Pages Directory
   - pages/Edit Column Inventory.py
   - pages/View Flow Chart.py
+  - pages/Gradient Engine.py
   # Equipment Monograph Images
   - assets/manual_injector.png
   - assets/uhplc.png
