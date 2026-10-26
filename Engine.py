@@ -160,7 +160,9 @@ class Efficiency:
     def predict_required_plates():
         current_res = Efficiency._get_safe_last('all_resolutions_final', 1.0)
         current_plates = Efficiency._get_safe_last('plates', 10000)
+        
         required_res = st.session_state.get('res_spec', 1.5)
+        print(f'Current plates: {current_plates}. Current res: {current_res}. Required res: {required_res}')
         
         required_plates = ((required_res * (current_plates ** 0.5)) / current_res) ** 2
         if 'required_plates_history' not in st.session_state or not isinstance(st.session_state.required_plates_history, list):
@@ -254,7 +256,7 @@ class Efficiency:
             required_plates = Efficiency.predict_required_plates()
 
         predicted_N = current_N * 1.5
-        predicted_bp = current_bp * 0.85
+        predicted_bp = current_bp
         predicted_tR = current_tR
 
         enough_alone = (
@@ -262,6 +264,7 @@ class Efficiency:
             predicted_bp <= st.session_state.get('bpspec', 5000.0) and
             predicted_tR <= st.session_state.get('runspec', 30.0)
         )
+        print(f'N: {predicted_N}, BP: {predicted_bp}, tR: {predicted_tR}. Required: {required_plates}')
 
         if enough_alone:
             return {'is_spp': True, 'bp': predicted_bp, 'tR': predicted_tR, 'plates': predicted_N}
@@ -422,7 +425,10 @@ class Efficiency:
         active_floor = floors['rs_floor_spp'] if not current_is_spp else floors['rs_floor_fpp']
         print(f'Rs Floor is {active_floor}')
 
-        return current_rs < active_floor
+        return sns(
+            evaluate = current_rs < active_floor,
+            floor = active_floor
+        )
 
     @staticmethod
     def diagnose_flow_failure() -> str:
@@ -487,7 +493,8 @@ class Efficiency:
             predicted_rs = current_rs * np.sqrt(gamma)
             predicted_N = current_N * gamma
 
-            spp_bp_mult = 0.85 if (not current_spp and spp2) else (1.15 if (current_spp and not spp2) else 1.0)
+            #spp_bp_mult = 0.85 if (not current_spp and spp2) else (1.15 if (current_spp and not spp2) else 1.0)
+            spp_bp_mult = 1.0
             predicted_bp = current_bp * (F2 / current_F) * (L2 / current_L) * ((current_dp / dp2) ** 2) * spp_bp_mult
             predicted_tR = current_tR * (current_F / F2) * (L2 / current_L)
 
@@ -1000,8 +1007,9 @@ def evaluate_next_run_conditions(peakspec, runspec, res_spec, bpspec):
         tR_below = (latest_runtime < runspec) and not tR_far_below
         tR_above = latest_runtime > runspec
         pass_resolution = latest_resolution >= res_spec
-        
-        rs_below_floor = Efficiency.is_Rs_below_floor()
+        rs_floor_ns = Efficiency.is_Rs_below_floor()
+        rs_below_floor = rs_floor_ns.evaluate
+        rs_floor = rs_floor_ns.floor
 
         if pass_resolution:
             run_metrics = (
@@ -1048,12 +1056,13 @@ def evaluate_next_run_conditions(peakspec, runspec, res_spec, bpspec):
             # =========================================================================
             if tR_far_below:
                 if rs_below_floor:
+                    # The requirements indeed say to Increase L even though Rs below floor. Definitely verify this.
                     st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ << Spec | $R_s$ below floor")
                     res = Efficiency.column_length()
                     excerpt = ''
                     if res is not None:
                         excerpt = (
-                            f" Severe resolution deficit ($R_s < 0.5$) requires a major increase in plate count ($N \\propto L$). "
+                            f" Severe resolution deficit ($R_s < {rs_floor:.2f}$) requires a major increase in plate count ($N \\propto L$). "
                             f"Since runtime is far below specification ($t_R < 0.5 \\times t_{{R,\\text{{spec}}}}$), increasing column length ($L$) provides "
                             f"the necessary efficiency gains while keeping $t_R$ safely within bounds.\n"
                             f"Predicted Metrics -> $L$: {res['length']:.0f} mm | $R_s$: {res['rs']:.2f} | $N$: {res['plates']:.0f} | "
@@ -1098,12 +1107,13 @@ def evaluate_next_run_conditions(peakspec, runspec, res_spec, bpspec):
             # CASE B: RUNTIME BELOW SPEC (tR < Spec) & RESOLUTION DEFICIT
             # =========================================================================
             elif tR_below:
+                # VALIDATED! 
                 if rs_below_floor:
                     st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ < Spec | $R_s$ below floor -> Triggering Selectivity.")
                     st.warning(
-                        "⚠️ **Resolution is below the hard efficiency floor ($R_s < 0.5$) with tight runtime remaining.**\n\n"
+                        f"⚠️ **Resolution is below the hard efficiency floor ($R_s < {rs_floor:.2f}$) with tight runtime remaining.**\n\n"
                         "Gaining sufficient resolution through efficiency alone requires $N \\propto R_s^2$ (a $4\\times$ plate increase for $2\\times$ $R_s$), "
-                        "which would breach the runtime specification. **Escalating directly to Selectivity (α) Cycle** to shift retention order."
+                        "which would breach the runtime and/or backpressure specification. **Escalating directly to Selectivity (α) Cycle** to shift retention order."
                     )
                     handle_selectivity(prev_b=False)
                 else:
@@ -1139,7 +1149,7 @@ def evaluate_next_run_conditions(peakspec, runspec, res_spec, bpspec):
                 if rs_below_floor:
                     st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ > Spec | $R_s$ below floor -> Triggering Selectivity.")
                     st.warning(
-                        "⚠️ **Method exceeds runtime specification ($t_R > t_{{R,\\text{{spec}}}}$) AND resolution is below floor ($R_s < 0.5$).**\n\n"
+                        f"⚠️ **Method exceeds runtime specification ($t_R > t_{{R,\\text{{spec}}}}$) AND resolution is below floor ($R_s < {rs_floor:.2f}$).**\n\n"
                         "Increasing column length or lowering flow rate to gain efficiency would exacerbate the runtime defect. "
                         "**Escalating directly to Selectivity (α) Cycle** to resolve the critical peak pair chemically."
                     )
