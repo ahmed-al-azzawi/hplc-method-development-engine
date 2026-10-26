@@ -178,6 +178,7 @@ class Efficiency:
         current_height = Efficiency._get_safe_last('heights', None)
         current_rs = Efficiency._get_safe_last('all_resolutions_final', 1.0)
         current_N = Efficiency._get_safe_last('plates', 10000)
+        
         if current_height is None:
             current_N = Efficiency._get_safe_last('plates', 10000)
             current_height_mm = current_length / current_N
@@ -208,7 +209,8 @@ class Efficiency:
         )
         predicted_rs = current_rs * ((predicted_N / current_N) ** 0.5)
         if enough_alone:
-            return {'length': new_length, 'bp': predicted_bp, 'tR': predicted_tR, 'plates': predicted_N, 'rs': predicted_rs}
+            return {'length': new_length, 'bp': predicted_bp, 'tR': predicted_tR, 'plates': predicted_N, 'rs': predicted_rs,
+                    'changes': f'Column Length: {current_length} mm → {new_length}'}
         return None
 
     @staticmethod
@@ -241,7 +243,9 @@ class Efficiency:
         )
         predicted_rs = current_rs * ((predicted_N / current_N) ** 0.5)
         if enough_alone:
-            return {'size': new_size, 'bp': predicted_bp, 'tR': predicted_tR, 'plates': predicted_N, 'rs':predicted_rs}
+            return {'size': new_size, 'bp': predicted_bp, 'tR': predicted_tR, 'plates': predicted_N, 'rs':predicted_rs, 
+                    'changes': f'Particle Size: {current_PS} µm → {new_size} µm'
+                    }
         return None
 
     @staticmethod
@@ -269,8 +273,12 @@ class Efficiency:
         )
         print(f'N: {predicted_N}, BP: {predicted_bp}, tR: {predicted_tR}. Required: {required_plates}')
         predicted_rs = current_rs * ((predicted_N / current_N) ** 0.5)
+        current_coreshell_info = 'Fully Porous Particle (FPP)' if current_is_spp else 'Superficially Porous Particle (SPP)'
         if enough_alone:
-            return {'is_spp': True, 'bp': predicted_bp, 'tR': predicted_tR, 'plates': predicted_N, 'rs': predicted_rs}
+            return {
+                    'is_spp': True, 'bp': predicted_bp, 'tR': predicted_tR, 
+                    'plates': predicted_N, 'rs': predicted_rs, 'changes': f'Particle Type: {current_coreshell_info} → Superficially Porous Particle (SPP)'
+            }
         return None
 
     @staticmethod
@@ -359,7 +367,8 @@ class Efficiency:
             'bp': best_candidate['bp'],
             'tR': best_candidate['tR'],
             'plates': best_candidate['plates'],
-            'rs': best_candidate['predicted_rs']
+            'rs': best_candidate['predicted_rs'],
+            'changes': f'Flow Rate: {current_flow} → {best_candidate['flow_rate']}'
         }
 
     @staticmethod
@@ -1067,7 +1076,7 @@ def evaluate_next_run_conditions(peakspec, runspec, res_spec, bpspec):
                         excerpt = (
                             f" Severe resolution deficit ($R_s < {rs_floor:.2f}$) requires a major increase in plate count ($N \\propto L$). "
                             f"Since runtime is far below specification ($t_R < 0.5 \\times t_{{R,\\text{{spec}}}}$), increasing column length ($L$) provides "
-                            f"the necessary efficiency gains while keeping $t_R$ safely within bounds.\n"
+                            f"some efficiency improvement while keeping $t_R$ safely within bounds. New Length: {res['length']} mm\n"
                             f"Predicted Metrics -> $L$: {res['length']:.0f} mm | $R_s$: {res['rs']:.2f} | $N$: {res['plates']:.0f} | "
                             f"Runtime: {res['tR']:.2f} min | Pressure: {res['bp']:.0f} psi\n"
                             f"Cycle: Efficiency | Equipment: Column"
@@ -1099,6 +1108,10 @@ def evaluate_next_run_conditions(peakspec, runspec, res_spec, bpspec):
                             f"Runtime: {best['tR']:.2f} min | Pressure: {best['bp']:.0f} psi\n"
                             f"Cycle: Efficiency | Equipment: {best.get('equipment', 'Column/Pump').capitalize()}"
                         )
+                        ###!!!!
+                        st.session_state.efficiency_candidates = valid
+                        st.session_state.show_efficiency_ui = True
+                        st.rerun()
                     else:
                         excerpt = " However, no single-parameter adjustment satisfies both $R_s$ and pressure limits simultaneously. Tool has automatically escalated to candidate combinations."
 
@@ -2566,14 +2579,23 @@ def main():
 
         options_map = {}
         for i, c in enumerate(candidates):
-            label = (
-                f"Option {i+1}: {', '.join(c['changes'])}\n"
-                f"⏱️ tR: {c['tR']:.2f} min | "
-                f"🎯 Rs: {c['predicted_rs']:.2f} | "
-                f"⚡ BP: {c['bp']:.0f} psi | "
-                f"🧪 Solvent: {c['solvent_used']:.1f} mL"
-            )
-            options_map[label] = c
+            try:
+                label = (
+                    f"Option {i+1}: {', '.join(c['changes'])}\n"
+                    f"⏱️ tR: {c['tR']:.2f} min | "
+                    f"🎯 Rs: {c['predicted_rs']:.2f} | "
+                    f"⚡ BP: {c['bp']:.0f} psi | "
+                    f"🧪 Solvent: {c['solvent_used']:.1f} mL"
+                )
+                options_map[label] = c
+            except KeyError:
+                label = (
+                    f"Option {i+1}: {', '.join(c['changes'])}\n"
+                    f"⏱️ tR: {c['tR']:.2f} min | "
+                    f"🎯 Rs: {c['rs']:.2f} | "
+                    f"⚡ BP: {c['bp']:.0f} psi | "
+                )
+                options_map[label] = c
 
         radio_key = "eff_radio_main_selection"
 
@@ -2585,7 +2607,10 @@ def main():
         )
 
         active_cand = options_map[selected_label]
-        st.caption(f"💡 **Economic Justification:** {active_cand['justification']}")
+        try:
+            st.caption(f"💡 **Economic Justification:** {active_cand['justification']}")
+        except:
+            pass
 
         if st.button("Confirm Selected Strategy", type="primary"):
             Efficiency.commit_efficiency_selection(active_cand)
