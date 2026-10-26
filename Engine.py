@@ -2729,5 +2729,21 @@ if __name__ == "__main__":
     if not st.runtime.exists():
         sys.argv = ["streamlit", "run", __file__]
         sys.exit(stcli.main())
-
-    main()
+    st.markdown(
+        '# HPLC Method Development Engine\n'
+        'Continue with either Isocratic Method Development or Gradient Method Development'
+    )
+    try:
+        allow_it
+    except NameError:
+        allow_it = False
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button('Isocratic Development', type='primary'):
+            allow_it = True
+    with col2:
+        if st.button('Gradient Development', type='primary'):
+            allow_it = True
+            st.switch_page('pages/Gradient Engine.py')
+    if allow_it:
+        main()
