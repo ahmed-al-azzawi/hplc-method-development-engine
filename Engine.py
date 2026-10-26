@@ -210,7 +210,7 @@ class Efficiency:
         predicted_rs = current_rs * ((predicted_N / current_N) ** 0.5)
         if enough_alone:
             return {'length': new_length, 'bp': predicted_bp, 'tR': predicted_tR, 'plates': predicted_N, 'rs': predicted_rs,
-                    'changes': f'Column Length: {current_length} mm → {new_length}'}
+                    'changes': [f'Column Length: {current_length} mm → {new_length}']}
         return None
 
     @staticmethod
@@ -244,7 +244,7 @@ class Efficiency:
         predicted_rs = current_rs * ((predicted_N / current_N) ** 0.5)
         if enough_alone:
             return {'size': new_size, 'bp': predicted_bp, 'tR': predicted_tR, 'plates': predicted_N, 'rs':predicted_rs, 
-                    'changes': f'Particle Size: {current_PS} µm → {new_size} µm'
+                    'changes': [f'Particle Size: {current_PS} µm → {new_size} µm']
                     }
         return None
 
@@ -277,7 +277,7 @@ class Efficiency:
         if enough_alone:
             return {
                     'is_spp': True, 'bp': predicted_bp, 'tR': predicted_tR, 
-                    'plates': predicted_N, 'rs': predicted_rs, 'changes': f'Particle Type: {current_coreshell_info} → Superficially Porous Particle (SPP)'
+                    'plates': predicted_N, 'rs': predicted_rs, 'changes': [f'Particle Type: {current_coreshell_info} → Superficially Porous Particle (SPP)']
             }
         return None
 
@@ -368,7 +368,7 @@ class Efficiency:
             'tR': best_candidate['tR'],
             'plates': best_candidate['plates'],
             'rs': best_candidate['predicted_rs'],
-            'changes': f'Flow Rate: {current_flow} → {best_candidate['flow_rate']}'
+            'changes': [f'Flow Rate: {current_flow} → {best_candidate['flow_rate']}']
         }
 
     @staticmethod
