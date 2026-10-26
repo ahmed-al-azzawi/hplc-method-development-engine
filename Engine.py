@@ -17,6 +17,7 @@ from scipy.optimize import linear_sum_assignment
 from types import SimpleNamespace as sns 
 import streamlit.components.v1 as components
 import json
+import traceback
 
 st.set_page_config(
     page_title="HPLC Method Development App",
@@ -175,7 +176,8 @@ class Efficiency:
     def column_length():
         current_length = Efficiency._get_safe_last('all_column_lengths', 150.0)
         current_height = Efficiency._get_safe_last('heights', None)
-        
+        current_rs = Efficiency._get_safe_last('all_resolutions_final', 1.0)
+        current_N = Efficiency._get_safe_last('plates', 10000)
         if current_height is None:
             current_N = Efficiency._get_safe_last('plates', 10000)
             current_height_mm = current_length / current_N
@@ -204,9 +206,9 @@ class Efficiency:
             predicted_bp <= st.session_state.get('bpspec', 4000.0) and
             predicted_tR <= st.session_state.get('runspec', 15.0)
         )
-
+        predicted_rs = current_rs * ((predicted_N / current_N) ** 0.5)
         if enough_alone:
-            return {'length': new_length, 'bp': predicted_bp, 'tR': predicted_tR, 'plates': predicted_N}
+            return {'length': new_length, 'bp': predicted_bp, 'tR': predicted_tR, 'plates': predicted_N, 'rs': predicted_rs}
         return None
 
     @staticmethod
@@ -215,6 +217,7 @@ class Efficiency:
         current_tR = Efficiency._get_safe_last('all_run_times', 10.0)
         current_N = Efficiency._get_safe_last('plates', 10000)
         current_PS = Efficiency._get_safe_last('all_particle_sizes', 5.0)
+        current_rs = Efficiency._get_safe_last('all_resolutions_final', 1.0)
         
         required_plates = Efficiency._get_safe_last('required_plates_history', None)
         if required_plates is None:
@@ -236,9 +239,9 @@ class Efficiency:
             predicted_bp <= st.session_state.get('bpspec', 5000.0) and
             predicted_tR <= st.session_state.get('runspec', 30.0)
         )
-
+        predicted_rs = current_rs * ((predicted_N / current_N) ** 0.5)
         if enough_alone:
-            return {'size': new_size, 'bp': predicted_bp, 'tR': predicted_tR, 'plates': predicted_N}
+            return {'size': new_size, 'bp': predicted_bp, 'tR': predicted_tR, 'plates': predicted_N, 'rs':predicted_rs}
         return None
 
     @staticmethod
@@ -247,7 +250,7 @@ class Efficiency:
         current_tR = Efficiency._get_safe_last('all_run_times', 10.0)
         current_N = Efficiency._get_safe_last('plates', 10000)
         current_is_spp = Efficiency._get_safe_last('all_coreshells', False)
-
+        current_rs = Efficiency._get_safe_last('all_resolutions_final', 1.0)
         if current_is_spp:
             return None
 
@@ -265,9 +268,9 @@ class Efficiency:
             predicted_tR <= st.session_state.get('runspec', 30.0)
         )
         print(f'N: {predicted_N}, BP: {predicted_bp}, tR: {predicted_tR}. Required: {required_plates}')
-
+        predicted_rs = current_rs * ((predicted_N / current_N) ** 0.5)
         if enough_alone:
-            return {'is_spp': True, 'bp': predicted_bp, 'tR': predicted_tR, 'plates': predicted_N}
+            return {'is_spp': True, 'bp': predicted_bp, 'tR': predicted_tR, 'plates': predicted_N, 'rs': predicted_rs}
         return None
 
     @staticmethod
@@ -356,7 +359,7 @@ class Efficiency:
             'bp': best_candidate['bp'],
             'tR': best_candidate['tR'],
             'plates': best_candidate['plates'],
-            'Rs': best_candidate['predicted_rs']
+            'rs': best_candidate['predicted_rs']
         }
 
     @staticmethod
@@ -2360,8 +2363,7 @@ def main():
                 st.session_state.bpspec = bpspec
             try:
                 dataframe_added = safe_read(added_file)
-                efficiency_data = Efficiency.find_efficiency(dataframe_added)
-                required_n = Efficiency.predict_required_plates()
+
                 # Peak Count
                 peak_cnt = peak_count(dataframe_added)
                 
@@ -2492,6 +2494,9 @@ def main():
                 st.session_state.all_equilibrated.append(bp_analysis['equilibrated'])
                 st.session_state.all_backpressures.append(bp_analysis['backpressure'])
 
+                efficiency_data = Efficiency.find_efficiency(dataframe_added)
+                required_n = Efficiency.predict_required_plates()
+
                 # Mark file as processed
                 st.session_state.processed_file_ids.add(file_id)
                 st.success(f"Successfully processed {added_file.name}!")
@@ -2501,6 +2506,9 @@ def main():
                     evaluate_next_run_conditions(peakspec, runspec, res_spec, bpspec)
 
             except Exception as e:
+                tb_str = traceback.format_exc()
+                print("=== FULL EXCEPTION TRACEBACK ===")
+                print(tb_str)
                 st.error(f"Error parsing {added_file.name}: {e}")
     # Optional View
     with st.expander("🔍 View Raw Parsed Values (Session State)", expanded=False):
