@@ -1,7 +1,13 @@
 import streamlit as st
 
 
-import streamlit as st
+column_svg = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%23FFFFFF'/%3E%3C!-- End fittings --%3E%3Crect x='10' y='26' width='6' height='12' rx='2' fill='%23001F54'/%3E%3Crect x='48' y='26' width='6' height='12' rx='2' fill='%23001F54'/%3E%3C!-- Main Column Body --%3E%3Crect x='16' y='28' width='32' height='8' rx='2' fill='%23CBD5E1' stroke='%23001F54' stroke-width='2'/%3E%3C!-- Packed Bed / Core --%3E%3Crect x='20' y='30' width='24' height='4' rx='1' fill='%23D32F2F'/%3E%3C!-- Flow Direction Arrows --%3E%3Cpath d='M 6 32 L 10 32 M 54 32 L 58 32' stroke='%23001F54' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E"
+
+st.set_page_config(
+    page_title="Edit Column Inventory",
+    page_icon=column_svg,
+    layout="wide",
+)
 
 
 def get_default_column_inventory() -> list:
