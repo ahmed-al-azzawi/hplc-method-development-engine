@@ -15,6 +15,16 @@ from scipy.stats import linregress
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
+
+# Custom SVG encoded as a data URI
+b_profile_svg = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%23FFFFFF'/%3E%3Cpath d='M 8 48 L 20 48 L 40 16 L 50 16 L 56 48' fill='none' stroke='%23001F54' stroke-width='6' stroke-linecap='round' stroke-linejoin='round'/%3E%3Ccircle cx='20' cy='48' r='3.5' fill='%23D32F2F'/%3E%3Ccircle cx='40' cy='16' r='3.5' fill='%23D32F2F'/%3E%3C/svg%3E"
+
+st.set_page_config(
+    page_title="Gradient Engine",
+    page_icon=b_profile_svg,
+    layout="wide"
+)
+
 print('''
 Case	Peaks	Rs min	Action
 G1 ↑	< 7	0	Increase GS: same %B window, tG × 0.5
