@@ -247,11 +247,7 @@ class Efficiency:
         )
         predicted_rs = current_rs * ((predicted_N / current_N) ** 0.5)
         if enough_alone:
-            return {
-                'size': new_size, 'bp': predicted_bp, 'tR': predicted_tR, 'plates': predicted_N, 'rs':predicted_rs, 
-                'changes': [f'Particle Size: {current_PS} µm → {new_size} µm'],
-                'equipment': 'Column'
-                }
+            return {'size': new_size, 'bp': predicted_bp, 'tR': predicted_tR, 'plates': predicted_N, 'rs':predicted_rs}
         return None
 
     @staticmethod
@@ -279,13 +275,8 @@ class Efficiency:
         )
         print(f'N: {predicted_N}, BP: {predicted_bp}, tR: {predicted_tR}. Required: {required_plates}')
         predicted_rs = current_rs * ((predicted_N / current_N) ** 0.5)
-        current_coreshell_info = 'Fully Porous Particle (FPP)' if current_is_spp else 'Superficially Porous Particle (SPP)'
         if enough_alone:
-            return {
-                'is_spp': True, 'bp': predicted_bp, 'tR': predicted_tR, 
-                'plates': predicted_N, 'rs': predicted_rs, 'changes': [f'Particle Type: {current_coreshell_info} → Superficially Porous Particle (SPP)'],
-                'equipment': 'Column'
-            }
+            return {'is_spp': True, 'bp': predicted_bp, 'tR': predicted_tR, 'plates': predicted_N, 'rs': predicted_rs}
         return None
 
     @staticmethod
@@ -374,9 +365,7 @@ class Efficiency:
             'bp': best_candidate['bp'],
             'tR': best_candidate['tR'],
             'plates': best_candidate['plates'],
-            'rs': best_candidate['predicted_rs'],
-            'changes': [f'Flow Rate: {current_flow} → {best_candidate['flow_rate']}'],
-            'equipment': 'Pump'
+            'rs': best_candidate['predicted_rs']
         }
 
     @staticmethod
@@ -670,63 +659,41 @@ class Efficiency:
         def safe_append(key, val):
             if key not in st.session_state or not isinstance(st.session_state[key], list):
                 st.session_state[key] = []
-            try:
-                st.session_state[key].append(val)
-            except KeyError as e:
-                print(e)
+            st.session_state[key].append(val)
 
         modified_parameters = []
 
-        # Retrieve current active state values as baseline fallbacks
-        current_L = Efficiency._get_safe_last('all_column_lengths', 150.0)
-        current_dp = Efficiency._get_safe_last('all_particle_sizes', 5.0)
-        current_spp = Efficiency._get_safe_last('all_coreshells', False)
-        current_F = Efficiency._get_safe_last('all_flow_rates', 1.0)
+        # Modify explicitly changed controlled keys
+        safe_append('all_flow_rates', selected_candidate['flow_rate'])
+        modified_parameters.append('all_flow_rates')
 
-        # Safely extract candidate values; carry forward current values if key is absent
-        next_L = selected_candidate.get('length', current_L)
-        next_dp = selected_candidate.get('size', current_dp)
-        next_spp = selected_candidate.get('is_spp', current_spp)
-        next_F = selected_candidate.get(
-            'flow_rate', selected_candidate.get('flow', current_F)
-        )
+        safe_append('all_column_lengths', selected_candidate['L'])
+        modified_parameters.append('all_column_lengths')
 
-        # Append synchronized values for the next run cycle
-        safe_append('all_column_lengths', next_L)
-        safe_append('all_particle_sizes', next_dp)
-        safe_append('all_coreshells', next_spp)
-        safe_append('all_flow_rates', next_F)
+        safe_append('all_particle_sizes', selected_candidate['dp'])
+        modified_parameters.append('all_particle_sizes')
+
+        safe_append('all_coreshells', selected_candidate['is_spp'])
+        modified_parameters.append('all_coreshells')
 
         # Replicate unmodified static controlled keys
-        print('''for key in static_keys:
+        for key in static_keys:
             if key not in modified_parameters:
                 if key in st.session_state and isinstance(st.session_state[key], list) and st.session_state[key]:
-                    st.session_state[key].append(st.session_state[key][-1])''')
+                    st.session_state[key].append(st.session_state[key][-1])
 
         # Render diagnostic banner
         changes_str = "; ".join(selected_candidate['changes'])
-        try:
-            st.info(
-                f"**Next Run Conditions (Cycle: Efficiency)**\n\n"
-                f"- **Equipment Required:** {selected_candidate['equipment'].capitalize()}\n"
-                f"- **Adjustments:** {changes_str}\n\n"
-                f"**Projected Target Metrics:**\n"
-                f"- Resolution ($R_s$): **{selected_candidate['predicted_rs']:.2f}**\n"
-                f"- Run Time ($t_R$): **{selected_candidate['tR']:.2f} min**\n"
-                f"- Backpressure ($P$): **{selected_candidate['bp']:.1f} psi**\n"
-                f"- Solvent Consumption: **{selected_candidate['solvent_used']:.1f} mL**"
-            )
-        except KeyError as e:
-            print(e)
-            st.info(
-                f"**Next Run Conditions (Cycle: Efficiency)**\n\n"
-                f"- **Equipment Required:** {selected_candidate['equipment'].capitalize()}\n"
-                f"- **Adjustments:** {changes_str}\n\n"
-                f"**Projected Target Metrics:**\n"
-                f"- Resolution ($R_s$): **{selected_candidate['rs']:.2f}**\n"
-                f"- Run Time ($t_R$): **{selected_candidate['tR']:.2f} min**\n"
-                f"- Backpressure ($P$): **{selected_candidate['bp']:.1f} psi**\n"
-            )
+        st.info(
+            f"**Next Run Conditions (Cycle: Efficiency)**\n\n"
+            f"- **Equipment Required:** {selected_candidate['equipment'].capitalize()}\n"
+            f"- **Adjustments:** {changes_str}\n\n"
+            f"**Projected Target Metrics:**\n"
+            f"- Resolution ($R_s$): **{selected_candidate['predicted_rs']:.2f}**\n"
+            f"- Run Time ($t_R$): **{selected_candidate['tR']:.2f} min**\n"
+            f"- Backpressure ($P$): **{selected_candidate['bp']:.1f} psi**\n"
+            f"- Solvent Consumption: **{selected_candidate['solvent_used']:.1f} mL**"
+        )
         st.success("Successfully committed efficiency conditions to session state!")
 
         # Close UI block and clean candidate state
@@ -1106,7 +1073,7 @@ def evaluate_next_run_conditions(peakspec, runspec, res_spec, bpspec):
                         excerpt = (
                             f" Severe resolution deficit ($R_s < {rs_floor:.2f}$) requires a major increase in plate count ($N \\propto L$). "
                             f"Since runtime is far below specification ($t_R < 0.5 \\times t_{{R,\\text{{spec}}}}$), increasing column length ($L$) provides "
-                            f"some efficiency improvement while keeping $t_R$ safely within bounds. New Length: {res['length']} mm\n"
+                            f"the necessary efficiency gains while keeping $t_R$ safely within bounds.\n"
                             f"Predicted Metrics -> $L$: {res['length']:.0f} mm | $R_s$: {res['rs']:.2f} | $N$: {res['plates']:.0f} | "
                             f"Runtime: {res['tR']:.2f} min | Pressure: {res['bp']:.0f} psi\n"
                             f"Cycle: Efficiency | Equipment: Column"
@@ -1138,10 +1105,6 @@ def evaluate_next_run_conditions(peakspec, runspec, res_spec, bpspec):
                             f"Runtime: {best['tR']:.2f} min | Pressure: {best['bp']:.0f} psi\n"
                             f"Cycle: Efficiency | Equipment: {best.get('equipment', 'Column/Pump').capitalize()}"
                         )
-                        ###!!!!
-                        st.session_state.efficiency_candidates = valid
-                        st.session_state.show_efficiency_ui = True
-                        st.rerun()
                     else:
                         excerpt = " However, no single-parameter adjustment satisfies both $R_s$ and pressure limits simultaneously. Tool has automatically escalated to candidate combinations."
 
@@ -2609,23 +2572,14 @@ def main():
 
         options_map = {}
         for i, c in enumerate(candidates):
-            try:
-                label = (
-                    f"Option {i+1}: {', '.join(c['changes'])}\n"
-                    f"⏱️ tR: {c['tR']:.2f} min | "
-                    f"🎯 Rs: {c['predicted_rs']:.2f} | "
-                    f"⚡ BP: {c['bp']:.0f} psi | "
-                    f"🧪 Solvent: {c['solvent_used']:.1f} mL"
-                )
-                options_map[label] = c
-            except KeyError:
-                label = (
-                    f"Option {i+1}: {', '.join(c['changes'])}\n"
-                    f"⏱️ tR: {c['tR']:.2f} min | "
-                    f"🎯 Rs: {c['rs']:.2f} | "
-                    f"⚡ BP: {c['bp']:.0f} psi | "
-                )
-                options_map[label] = c
+            label = (
+                f"Option {i+1}: {', '.join(c['changes'])}\n"
+                f"⏱️ tR: {c['tR']:.2f} min | "
+                f"🎯 Rs: {c['predicted_rs']:.2f} | "
+                f"⚡ BP: {c['bp']:.0f} psi | "
+                f"🧪 Solvent: {c['solvent_used']:.1f} mL"
+            )
+            options_map[label] = c
 
         radio_key = "eff_radio_main_selection"
 
@@ -2637,10 +2591,7 @@ def main():
         )
 
         active_cand = options_map[selected_label]
-        try:
-            st.caption(f"💡 **Economic Justification:** {active_cand['justification']}")
-        except:
-            pass
+        st.caption(f"💡 **Economic Justification:** {active_cand['justification']}")
 
         if st.button("Confirm Selected Strategy", type="primary"):
             Efficiency.commit_efficiency_selection(active_cand)
