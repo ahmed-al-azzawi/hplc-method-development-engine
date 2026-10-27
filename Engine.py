@@ -173,11 +173,10 @@ class Efficiency:
         return required_plates
 
     @staticmethod
-    def column_length():
+    def column_length(care_about_resolution=True):
         current_length = Efficiency._get_safe_last('all_column_lengths', 150.0)
         current_height = Efficiency._get_safe_last('heights', None)
         current_rs = Efficiency._get_safe_last('all_resolutions_final', 1.0)
-        current_N = Efficiency._get_safe_last('plates', 10000)
         
         if current_height is None:
             current_N = Efficiency._get_safe_last('plates', 10000)
@@ -207,10 +206,15 @@ class Efficiency:
             predicted_bp <= st.session_state.get('bpspec', 4000.0) and
             predicted_tR <= st.session_state.get('runspec', 15.0)
         )
-        predicted_rs = current_rs * ((predicted_N / current_N) ** 0.5)
-        if enough_alone:
+        predicted_rs = current_rs * (length_ratio ** 0.5)
+        print(f'Predicted Rs for COL LEN: {predicted_rs}')
+        if care_about_resolution:
+            res_eval = predicted_rs >= st.session_state.res_spec
+        else:
+            res_eval = True
+        if enough_alone and res_eval:
             return {'length': new_length, 'bp': predicted_bp, 'tR': predicted_tR, 'plates': predicted_N, 'rs': predicted_rs,
-                    'changes': [f'Column Length: {current_length} mm → {new_length}']}
+                    'changes': [f'Column Length: {current_length} mm → {new_length}'], 'equipment': 'Column'}
         return None
 
     @staticmethod
@@ -243,9 +247,11 @@ class Efficiency:
         )
         predicted_rs = current_rs * ((predicted_N / current_N) ** 0.5)
         if enough_alone:
-            return {'size': new_size, 'bp': predicted_bp, 'tR': predicted_tR, 'plates': predicted_N, 'rs':predicted_rs, 
-                    'changes': [f'Particle Size: {current_PS} µm → {new_size} µm']
-                    }
+            return {
+                'size': new_size, 'bp': predicted_bp, 'tR': predicted_tR, 'plates': predicted_N, 'rs':predicted_rs, 
+                'changes': [f'Particle Size: {current_PS} µm → {new_size} µm'],
+                'equipment': 'Column'
+                }
         return None
 
     @staticmethod
@@ -276,8 +282,9 @@ class Efficiency:
         current_coreshell_info = 'Fully Porous Particle (FPP)' if current_is_spp else 'Superficially Porous Particle (SPP)'
         if enough_alone:
             return {
-                    'is_spp': True, 'bp': predicted_bp, 'tR': predicted_tR, 
-                    'plates': predicted_N, 'rs': predicted_rs, 'changes': [f'Particle Type: {current_coreshell_info} → Superficially Porous Particle (SPP)']
+                'is_spp': True, 'bp': predicted_bp, 'tR': predicted_tR, 
+                'plates': predicted_N, 'rs': predicted_rs, 'changes': [f'Particle Type: {current_coreshell_info} → Superficially Porous Particle (SPP)'],
+                'equipment': 'Column'
             }
         return None
 
@@ -368,7 +375,8 @@ class Efficiency:
             'tR': best_candidate['tR'],
             'plates': best_candidate['plates'],
             'rs': best_candidate['predicted_rs'],
-            'changes': [f'Flow Rate: {current_flow} → {best_candidate['flow_rate']}']
+            'changes': [f'Flow Rate: {current_flow} → {best_candidate['flow_rate']}'],
+            'equipment': 'Pump'
         }
 
     @staticmethod
@@ -662,41 +670,63 @@ class Efficiency:
         def safe_append(key, val):
             if key not in st.session_state or not isinstance(st.session_state[key], list):
                 st.session_state[key] = []
-            st.session_state[key].append(val)
+            try:
+                st.session_state[key].append(val)
+            except KeyError as e:
+                print(e)
 
         modified_parameters = []
 
-        # Modify explicitly changed controlled keys
-        safe_append('all_flow_rates', selected_candidate['flow_rate'])
-        modified_parameters.append('all_flow_rates')
+        # Retrieve current active state values as baseline fallbacks
+        current_L = Efficiency._get_safe_last('all_column_lengths', 150.0)
+        current_dp = Efficiency._get_safe_last('all_particle_sizes', 5.0)
+        current_spp = Efficiency._get_safe_last('all_coreshells', False)
+        current_F = Efficiency._get_safe_last('all_flow_rates', 1.0)
 
-        safe_append('all_column_lengths', selected_candidate['L'])
-        modified_parameters.append('all_column_lengths')
+        # Safely extract candidate values; carry forward current values if key is absent
+        next_L = selected_candidate.get('length', current_L)
+        next_dp = selected_candidate.get('size', current_dp)
+        next_spp = selected_candidate.get('is_spp', current_spp)
+        next_F = selected_candidate.get(
+            'flow_rate', selected_candidate.get('flow', current_F)
+        )
 
-        safe_append('all_particle_sizes', selected_candidate['dp'])
-        modified_parameters.append('all_particle_sizes')
-
-        safe_append('all_coreshells', selected_candidate['is_spp'])
-        modified_parameters.append('all_coreshells')
+        # Append synchronized values for the next run cycle
+        safe_append('all_column_lengths', next_L)
+        safe_append('all_particle_sizes', next_dp)
+        safe_append('all_coreshells', next_spp)
+        safe_append('all_flow_rates', next_F)
 
         # Replicate unmodified static controlled keys
-        for key in static_keys:
+        print('''for key in static_keys:
             if key not in modified_parameters:
                 if key in st.session_state and isinstance(st.session_state[key], list) and st.session_state[key]:
-                    st.session_state[key].append(st.session_state[key][-1])
+                    st.session_state[key].append(st.session_state[key][-1])''')
 
         # Render diagnostic banner
         changes_str = "; ".join(selected_candidate['changes'])
-        st.info(
-            f"**Next Run Conditions (Cycle: Efficiency)**\n\n"
-            f"- **Equipment Required:** {selected_candidate['equipment'].capitalize()}\n"
-            f"- **Adjustments:** {changes_str}\n\n"
-            f"**Projected Target Metrics:**\n"
-            f"- Resolution ($R_s$): **{selected_candidate['predicted_rs']:.2f}**\n"
-            f"- Run Time ($t_R$): **{selected_candidate['tR']:.2f} min**\n"
-            f"- Backpressure ($P$): **{selected_candidate['bp']:.1f} psi**\n"
-            f"- Solvent Consumption: **{selected_candidate['solvent_used']:.1f} mL**"
-        )
+        try:
+            st.info(
+                f"**Next Run Conditions (Cycle: Efficiency)**\n\n"
+                f"- **Equipment Required:** {selected_candidate['equipment'].capitalize()}\n"
+                f"- **Adjustments:** {changes_str}\n\n"
+                f"**Projected Target Metrics:**\n"
+                f"- Resolution ($R_s$): **{selected_candidate['predicted_rs']:.2f}**\n"
+                f"- Run Time ($t_R$): **{selected_candidate['tR']:.2f} min**\n"
+                f"- Backpressure ($P$): **{selected_candidate['bp']:.1f} psi**\n"
+                f"- Solvent Consumption: **{selected_candidate['solvent_used']:.1f} mL**"
+            )
+        except KeyError as e:
+            print(e)
+            st.info(
+                f"**Next Run Conditions (Cycle: Efficiency)**\n\n"
+                f"- **Equipment Required:** {selected_candidate['equipment'].capitalize()}\n"
+                f"- **Adjustments:** {changes_str}\n\n"
+                f"**Projected Target Metrics:**\n"
+                f"- Resolution ($R_s$): **{selected_candidate['rs']:.2f}**\n"
+                f"- Run Time ($t_R$): **{selected_candidate['tR']:.2f} min**\n"
+                f"- Backpressure ($P$): **{selected_candidate['bp']:.1f} psi**\n"
+            )
         st.success("Successfully committed efficiency conditions to session state!")
 
         # Close UI block and clean candidate state
