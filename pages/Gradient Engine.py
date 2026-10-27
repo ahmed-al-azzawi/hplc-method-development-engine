@@ -1,10 +1,9 @@
 import sys
 from pathlib import Path
+import os
 
-# Add project root directory to sys.path
-root_dir = Path(__file__).resolve().parent.parent
-if str(root_dir) not in sys.path:
-    sys.path.append(str(root_dir))
+# Add the pages directory to Python's module lookup path
+sys.path.append(os.path.dirname(__file__))
 
 from Engine import safe_read, peak_count, find_resolution, retention_time
 import streamlit as st
