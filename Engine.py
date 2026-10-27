@@ -29,6 +29,8 @@ st.session_state.pending_ligand_change = False
 st.session_state.tr_slope = 0
 st.session_state.tr_intercept = 0
 st.session_state.tr_tzero = 0
+if 'cope_step' not in st.session_state:
+   st.session_state.cope_step = 0
 
 
 def render_next_run_conditions_preview():
@@ -186,11 +188,44 @@ class Efficiency:
 
         current_bp = Efficiency._get_safe_last('all_backpressures', 1000.0)
         current_tR = Efficiency._get_safe_last('all_run_times', 10.0)
+        available_lengths = st.session_state.get('available_column_lengths', [50.0, 100.0, 150.0, 200.0, 250.0])
+
+        # Maximization Path: Ignore resolution target, find MAX length staying within 95% BP and 100% tR specs
+        if not care_about_resolution:
+            valid_max_candidates = [
+                (
+                    L,
+                    L / current_height_mm,
+                    current_bp * (L / current_length),
+                    current_tR * (L / current_length),
+                    current_rs * ((L / current_length) ** 0.5)
+                )
+                for L in available_lengths
+                if L > current_length 
+                and (current_bp * (L / current_length)) <= (st.session_state.get('bpspec', 4000.0) * 0.95)
+                and (current_tR * (L / current_length)) <= st.session_state.get('runspec', 15.0)
+            ]
+            
+            if not valid_max_candidates:
+                return None
+
+            new_length, predicted_N, predicted_bp, predicted_tR, predicted_rs = max(valid_max_candidates, key=lambda c: c[0])
+
+            return {
+                'length': new_length,
+                'bp': predicted_bp,
+                'tR': predicted_tR,
+                'plates': predicted_N,
+                'rs': predicted_rs,
+                'changes': [f"Increase Column Length ({current_length:.0f} mm → {new_length:.0f} mm)"],
+                'equipment': 'Column'
+            }
+
+        # Standard Target Path: Find MINIMUM column length that achieves required resolution
         required_plates = Efficiency._get_safe_last('required_plates_history', None)
         if required_plates is None:
             required_plates = Efficiency.predict_required_plates()
 
-        available_lengths = st.session_state.get('available_column_lengths', [50.0, 100.0, 150.0, 250.0])
         plate_counts = [L / current_height_mm for L in available_lengths]
         valid_candidates = [(L, N) for L, N in zip(available_lengths, plate_counts) if N >= required_plates]
 
@@ -201,20 +236,25 @@ class Efficiency:
         length_ratio = new_length / current_length
         predicted_bp = current_bp * length_ratio
         predicted_tR = current_tR * length_ratio
+        predicted_rs = current_rs * (length_ratio ** 0.5)
 
         enough_alone = (
             predicted_bp <= st.session_state.get('bpspec', 4000.0) and
-            predicted_tR <= st.session_state.get('runspec', 15.0)
+            predicted_tR <= st.session_state.get('runspec', 15.0) and
+            predicted_rs >= st.session_state.get('res_spec', 1.4)
         )
-        predicted_rs = current_rs * (length_ratio ** 0.5)
-        print(f'Predicted Rs for COL LEN: {predicted_rs}')
-        if care_about_resolution:
-            res_eval = predicted_rs >= st.session_state.res_spec
-        else:
-            res_eval = True
-        if enough_alone and res_eval:
-            return {'length': new_length, 'bp': predicted_bp, 'tR': predicted_tR, 'plates': predicted_N, 'rs': predicted_rs,
-                    'changes': [f'Column Length: {current_length} mm → {new_length}'], 'equipment': 'Column'}
+
+        if enough_alone:
+            return {
+                'length': new_length,
+                'bp': predicted_bp,
+                'tR': predicted_tR,
+                'plates': predicted_N,
+                'rs': predicted_rs,
+                'changes': [f"Increase Column Length ({current_length:.0f} mm → {new_length:.0f} mm)"],
+                'equipment': 'Column'
+            }
+
         return None
 
     @staticmethod
@@ -247,7 +287,9 @@ class Efficiency:
         )
         predicted_rs = current_rs * ((predicted_N / current_N) ** 0.5)
         if enough_alone:
-            return {'size': new_size, 'bp': predicted_bp, 'tR': predicted_tR, 'plates': predicted_N, 'rs':predicted_rs}
+            return {'size': new_size, 'bp': predicted_bp, 'tR': predicted_tR, 'plates': predicted_N, 'rs':predicted_rs, 'changes': [
+        f"Decrease Particle Size ({current_PS:.1f} µm → {new_size:.1f} µm)"
+    ],}
         return None
 
     @staticmethod
@@ -276,7 +318,7 @@ class Efficiency:
         print(f'N: {predicted_N}, BP: {predicted_bp}, tR: {predicted_tR}. Required: {required_plates}')
         predicted_rs = current_rs * ((predicted_N / current_N) ** 0.5)
         if enough_alone:
-            return {'is_spp': True, 'bp': predicted_bp, 'tR': predicted_tR, 'plates': predicted_N, 'rs': predicted_rs}
+            return {'is_spp': True, 'bp': predicted_bp, 'tR': predicted_tR, 'plates': predicted_N, 'rs': predicted_rs, 'changes': ['Switch to Superficially Porous (SPP / Core-Shell)']}
         return None
 
     @staticmethod
@@ -365,7 +407,10 @@ class Efficiency:
             'bp': best_candidate['bp'],
             'tR': best_candidate['tR'],
             'plates': best_candidate['plates'],
-            'rs': best_candidate['predicted_rs']
+            'rs': best_candidate['predicted_rs'],
+            'changes': [
+            f"Decrease Flow Rate ({current_flow:.2f} → {best_candidate['flow_rate']:.2f} mL/min)"
+            ],
         }
 
     @staticmethod
@@ -594,6 +639,8 @@ class Efficiency:
                     break
 
         if selected_candidates:
+            print(f'All Selected Candidates: {selected_candidates}')
+            print(f'We have ONLY {len(selected_candidates)} CANDIDATES!')
             # 1. Base sort by efficiency metrics (Lowest solvent, minimum runtime)
             selected_candidates.sort(key=lambda x: (x['solvent_used'], x['tR']))
 
@@ -701,7 +748,164 @@ class Efficiency:
         st.session_state.efficiency_candidates = []
 
 
-    
+    @staticmethod
+    def commit_single_parameter_selection(candidate: dict):
+        """Dedicated, crash-proof committer for single-parameter options (Length, Particle Size, SPP, Flow Rate).
+        Guarantees 1:1 session state array synchronization and handles missing keys safely.
+        """
+        # 1. Retrieve current baseline values for all 4 physical parameters
+        curr_L = float(Efficiency._get_safe_last('all_column_lengths', 150.0))
+        curr_dp = float(Efficiency._get_safe_last('all_particle_sizes', 5.0))
+        curr_spp = bool(Efficiency._get_safe_last('all_coreshells', False))
+        curr_F = float(Efficiency._get_safe_last('all_flow_rates', 1.0))
+
+        # 2. Extract proposed values based on parameter type with robust try/except fallbacks
+        next_L = curr_L
+        next_dp = curr_dp
+        next_spp = curr_spp
+        next_F = curr_F
+
+        change_logs = []
+
+        # Check for Column Length modification
+        if 'length' in candidate or 'L' in candidate:
+            next_L = float(candidate.get('length', candidate.get('L', curr_L)))
+            if next_L != curr_L:
+                change_logs.append(f"Column Length: {curr_L:.0f} mm → {next_L:.0f} mm")
+
+        # Check for Particle Size modification
+        if 'size' in candidate or 'dp' in candidate:
+            next_dp = float(candidate.get('size', candidate.get('dp', curr_dp)))
+            if next_dp != curr_dp:
+                change_logs.append(f"Particle Size: {curr_dp:.1f} µm → {next_dp:.1f} µm")
+
+        # Check for SPP/Core-Shell modification
+        if 'is_spp' in candidate:
+            next_spp = bool(candidate.get('is_spp', curr_spp))
+            if next_spp != curr_spp:
+                label = "Superficially Porous (SPP)" if next_spp else "Fully Porous (FPP)"
+                change_logs.append(f"Particle Type: {label}")
+
+        # Check for Flow Rate modification
+        if 'flow_rate' in candidate or 'flow' in candidate:
+            next_F = float(candidate.get('flow_rate', candidate.get('flow', curr_F)))
+            if next_F != curr_F:
+                change_logs.append(f"Flow Rate: {curr_F:.2f} → {next_F:.2f} mL/min")
+
+        # 3. Synchronize ALL 12 static state arrays so history never drifts out of alignment
+        static_keys = [
+            'all_solvents', 'all_ligands', 'all_bead_types',
+            'all_pore_sizes', 'all_coreshells', 'all_carbon_loads',
+            'all_column_lengths', 'all_internal_diameters', 'all_particle_sizes',
+            'all_flow_rates', 'all_temperatures', 'all_pct_bs'
+        ]
+
+        def safe_append(key, val):
+            if key not in st.session_state or not isinstance(st.session_state[key], list):
+                st.session_state[key] = []
+            st.session_state[key].append(val)
+
+        # Append updated parameters
+        safe_append('all_column_lengths', next_L)
+        safe_append('all_particle_sizes', next_dp)
+        safe_append('all_coreshells', next_spp)
+        safe_append('all_flow_rates', next_F)
+
+        # Replicate remaining static keys
+        updated_keys = {'all_column_lengths', 'all_particle_sizes', 'all_coreshells', 'all_flow_rates'}
+        for k in static_keys:
+            if k not in updated_keys:
+                val = Efficiency._get_safe_last(k, None)
+                if val is not None:
+                    safe_append(k, val)
+
+        # 4. Extract display metrics safely
+        try:
+            pred_rs = float(candidate.get('rs', candidate.get('predicted_rs', 0.0)))
+            pred_tr = float(candidate.get('tR', 0.0))
+            pred_bp = float(candidate.get('bp', 0.0))
+            equip_str = str(candidate.get('equipment', 'Column / Pump')).capitalize()
+            solvent_used = pred_tr * next_F
+        except Exception as e:
+            print(f"[DEBUG Commit Exception] {e}")
+            pred_rs, pred_tr, pred_bp, equip_str, solvent_used = 0.0, 0.0, 0.0, "Column", 0.0
+
+        # 5. Render Banner & Reset UI State
+        st.info(
+            f"**Next Run Conditions (Cycle: Single-Parameter Efficiency)**\n\n"
+            f"- **Equipment Required:** {equip_str}\n"
+            f"- **Adjustments:** {'; '.join(change_logs) if change_logs else 'Efficiency Optimization'}\n\n"
+            f"**Projected Target Metrics:**\n"
+            f"- Resolution ($R_s$): **{pred_rs:.2f}**\n"
+            f"- Run Time ($t_R$): **{pred_tr:.2f} min**\n"
+            f"- Backpressure ($P$): **{pred_bp:.0f} psi**\n"
+            f"- Estimated Solvent Usage: **{solvent_used:.1f} mL**"
+        )
+        st.success("Successfully committed single-parameter selection to state!")
+
+        st.session_state.show_single_param_ui = False
+        st.session_state.single_param_candidates = []
+
+    @staticmethod
+    def flow_rate_cope():
+        """Calculates minimal flow rate to bring runtime at least 5% under runspec.
+        Checks backpressure and resolution limits before returning.
+        """
+        curr_F = float(Efficiency._get_safe_last('all_flow_rates', 1.0))
+        curr_L = float(Efficiency._get_safe_last('all_column_lengths', 150.0))
+        curr_dp = float(Efficiency._get_safe_last('all_particle_sizes', 5.0))
+        curr_spp = bool(Efficiency._get_safe_last('all_coreshells', False))
+        curr_bp = float(Efficiency._get_safe_last('all_backpressures', 1000.0))
+        curr_tR = float(Efficiency._get_safe_last('all_run_times', 10.0))
+        curr_rs = float(Efficiency._get_safe_last('all_resolutions_final', 1.0))
+        curr_N = float(Efficiency._get_safe_last('plates', 10000.0))
+
+        bpspec = float(st.session_state.get('bpspec', 4000.0))
+        runspec = float(st.session_state.get('runspec', 15.0))
+        res_spec = float(st.session_state.get('res_spec', 1.4))
+
+        # Target runtime is 5% under runspec (0.95 * runspec)
+        target_tR = 0.95 * runspec
+        
+        # Calculate required minimal flow rate
+        target_F = curr_F * (curr_tR / target_tR)
+        target_F = float(np.round(target_F, 2))
+
+        # Calculate predicted backpressure
+        predicted_bp = curr_bp * (target_F / curr_F)
+        
+        if predicted_bp > bpspec:
+            return {"status": "exceeds_bp", "message": "Impossible to reach runtime spec without backpressure limit being exceeded."}
+
+        # Van Deemter check for resolution at target_F
+        ret_values = st.session_state.get('all_retention_times', [])
+        if not ret_values or len(ret_values[-1]) == 0:
+            return None
+        tzero = float(np.mean([tx[0] for tx in ret_values]))
+
+        u1 = curr_L / (tzero * 60.0)
+        u2 = u1 * (target_F / curr_F)
+        spp_factor = 1.5 if curr_spp else 1.0
+
+        hetp1 = (1.5 * curr_dp + (3.0 / u1) + 0.15 * (curr_dp ** 2) * u1) / spp_factor
+        hetp2 = (1.5 * curr_dp + (3.0 / u2) + 0.15 * (curr_dp ** 2) * u2) / spp_factor
+        gamma = hetp1 / hetp2
+
+        predicted_rs = curr_rs * np.sqrt(gamma)
+        predicted_N = curr_N * gamma
+
+
+        st.session_state.cope_step = st.session_state.get('cope_step', 0) + 1
+        return {
+            'flow_rate': target_F,
+            'bp': predicted_bp,
+            'tR': target_tR,
+            'rs': predicted_rs,
+            'plates': predicted_N,
+            'equipment': 'Pump',
+            'status': 'valid',
+            'changes': [f"Increase flow rate to {target_F:.2f} mL/min"]
+        }
    
 
 
@@ -1067,7 +1271,7 @@ def evaluate_next_run_conditions(peakspec, runspec, res_spec, bpspec):
                 if rs_below_floor:
                     # The requirements indeed say to Increase L even though Rs below floor. Definitely verify this.
                     st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ << Spec | $R_s$ below floor")
-                    res = Efficiency.column_length()
+                    res = Efficiency.column_length(care_about_resolution=False)
                     excerpt = ''
                     if res is not None:
                         excerpt = (
@@ -1094,22 +1298,26 @@ def evaluate_next_run_conditions(peakspec, runspec, res_spec, bpspec):
                         Efficiency.spp()
                     ]
                     valid = [c for c in candidates if c is not None]
-                    best = min(valid, key=lambda x: x['tR']) if valid else None
-                    excerpt = ''
-                    if best is not None:
-                        excerpt = (
-                            f" Moderate resolution deficit with significant runtime budget available ($t_R < 0.5 \\times t_{{R,\\text{{spec}}}}$). "
-                            f"Multiple single-parameter options exist ($L \\uparrow$, $F \\downarrow$, $d_p \\downarrow$, or Core-Shell SPP).\n"
-                            f"Optimal single adjustment selected: {best.get('description', 'Efficiency Parameter Adjustment')}.\n"
-                            f"Predicted Metrics -> $R_s$: {best['rs']:.2f} | $N$: {best['plates']:.0f} | "
-                            f"Runtime: {best['tR']:.2f} min | Pressure: {best['bp']:.0f} psi\n"
-                            f"Cycle: Efficiency | Equipment: {best.get('equipment', 'Column/Pump').capitalize()}"
+
+                    if valid:
+                        explanation = (
+                            " Moderate resolution deficit with significant runtime budget available ($t_R < 0.5 \\times t_{{R,\\text{{spec}}}}$).\n\n"
+                            "**Physical Rationale for Available Single-Parameter Adjustments:**\n"
+                            "- **Increase Column Length ($L \\uparrow$):** Directly increases theoretical plates ($N \\propto L$). Ideal here because the runtime increase ($t_R \\propto L$) easily fits within your remaining time budget.\n"
+                            "- **Decrease Flow Rate ($F \\downarrow$):** Increases analyte residence time in the column to gain efficiency ($N$) along the Van Deemter curve, trading unused runtime for resolution without hardware changes.\n"
+                            "- **Decrease Particle Size ($d_p \\downarrow$):** Sharply boosts plate count ($N \\propto 1/d_p$) and decreases reduced plate height ($h$), though at the cost of higher backpressure ($P \\propto 1/d_p^2$).\n"
+                            "- **Switch to Core-Shell (SPP):** Increases plate efficiency ($N \\approx 1.5 \\times N_{{\\text{{FPP}}}}$) by shortening intra-particle diffusion paths without increasing system backpressure or analysis time.\n\n"
+                            "*Select your preferred single-parameter strategy from the menu below.*"
                         )
                     else:
-                        excerpt = " However, no single-parameter adjustment satisfies both $R_s$ and pressure limits simultaneously. Tool has automatically escalated to candidate combinations."
+                        explanation = " However, no single-parameter adjustment satisfies both $R_s$ and pressure limits simultaneously. Tool has automatically escalated to candidate combinations."
 
-                    st.info(f"Prescribed Strategy: Increase $L$, decrease $F$, decrease $d_p$, or switch to SPP.{excerpt}")
-                    if 'However' in excerpt:
+                    st.info(f"**Prescribed Strategy: Single-Parameter Optimization**\n\n{explanation}")
+                    if valid:
+                        st.session_state.single_param_candidates = valid
+                        st.session_state.show_single_param_ui = True
+                    
+                    if not valid:
                         Efficiency.handle_efficiency()
 
             # =========================================================================
@@ -1133,64 +1341,82 @@ def evaluate_next_run_conditions(peakspec, runspec, res_spec, bpspec):
                         Efficiency.spp()
                     ]
                     valid = [c for c in candidates if c is not None]
-                    best = min(valid, key=lambda x: x['tR']) if valid else None
-                    excerpt = ''
-                    if best is not None:
-                        excerpt = (
-                            f" Moderate resolution deficit with modest runtime margin. Decreasing flow rate ($F$), reducing particle size ($d_p$), "
-                            f"or switching to Core-Shell (SPP) technology sharpens efficiency without the severe runtime penalty of increasing column length.\n"
-                            f"Optimal single adjustment selected: {best.get('description', 'Efficiency Parameter Adjustment')}.\n"
-                            f"Predicted Metrics -> $R_s$: {best['rs']:.2f} | $N$: {best['plates']:.0f} | "
-                            f"Runtime: {best['tR']:.2f} min | Pressure: {best['bp']:.0f} psi\n"
-                            f"Cycle: Efficiency | Equipment: {best.get('equipment', 'Pump/Column').capitalize()}"
-                        )
-                    else:
-                        excerpt = " However, single adjustments cannot bridge the resolution gap within the remaining runtime budget. Tool has automatically escalated to candidate combinations."
 
-                    st.info(f"Prescribed Strategy: Decrease $F$, decrease $d_p$, or switch to SPP.{excerpt}")
-                    if 'However' in excerpt:
+                    if valid:
+                        explanation = (
+                            " Moderate resolution deficit with modest runtime margin ($0.5 \\times t_{{R,\\text{{spec}}}} \\le t_R < t_{{R,\\text{{spec}}}}$).\n\n"
+                            "**Physical Rationale for Available Single-Parameter Adjustments:**\n"
+                            "- **Decrease Flow Rate ($F \\downarrow$):** Extends retention time ($t_R \\propto 1/F$) to optimize linear velocity along the Van Deemter curve, gaining plates ($N$) without modifying hardware.\n"
+                            "- **Decrease Particle Size ($d_p \\downarrow$):** Sharply boosts plate count ($N \\propto 1/d_p$) and reduces mass transfer resistance ($C$-term) without the severe analysis time penalty of increasing column length ($L$).\n"
+                            "- **Switch to Core-Shell (SPP):** Increases efficiency ($N \\approx 1.5 \\times N_{{\\text{{FPP}}}}$) by shortening intra-particle diffusion distances while maintaining lower backpressure than smaller fully porous particles.\n\n"
+                            "*Select your preferred single-parameter strategy from the menu below.*"
+                        )
+                        st.info(f"**Prescribed Strategy: Single-Parameter Optimization**\n\n{explanation}")
+
+                        # Set state flags ONLY if valid candidates exist
+                        st.session_state.single_param_candidates = valid
+                        st.session_state.show_single_param_ui = True
+                    else:
+                        explanation = " Single-parameter adjustments ($F \\downarrow$, $d_p \\downarrow$, SPP) cannot satisfy resolution ($R_s$) within remaining runtime margin and pressure limits. Escalating to multi-parameter combinations."
+                        st.info(f"**Prescribed Strategy: Multi-Parameter Combinatorial Optimization**\n\n{explanation}")
+
+                        # Reset flags and hand off execution
+                        st.session_state.single_param_candidates = []
+                        st.session_state.show_single_param_ui = False
                         Efficiency.handle_efficiency()
 
             # =========================================================================
             # CASE C: RUNTIME ABOVE SPEC (tR > Spec) & RESOLUTION DEFICIT
             # =========================================================================
-            elif tR_above:
-                if rs_below_floor:
-                    st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ > Spec | $R_s$ below floor -> Triggering Selectivity.")
-                    st.warning(
-                        f"⚠️ **Method exceeds runtime specification ($t_R > t_{{R,\\text{{spec}}}}$) AND resolution is below floor ($R_s < {rs_floor:.2f}$).**\n\n"
-                        "Increasing column length or lowering flow rate to gain efficiency would exacerbate the runtime defect. "
-                        "**Escalating directly to Selectivity (α) Cycle** to resolve the critical peak pair chemically."
-                    )
-                    handle_selectivity(prev_b=False)
-                else:
+            else:
                     st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ > Spec | Floor < $R_s$ < Spec")
-                    res_dp = Efficiency.particle_size()
-                    res_f = Efficiency.flow_rate()
-                    
-                    excerpt = ''
-                    if res_dp is not None:
-                        excerpt = (
-                            f" Decreasing particle size ($d_p$) significantly increases plate number ($N \\propto 1/d_p$) "
-                            f"and lowers reduced plate height ($h$), enabling faster flow rates ($F \\uparrow$) without loss of efficiency.\n"
-                            f"Predicted Metrics -> $d_p$: {res_dp['size']:.1f} µm | $R_s$: {res_dp['rs']:.2f} | $N$: {res_dp['plates']:.0f} | "
-                            f"Runtime: {res_dp['tR']:.2f} min | Pressure: {res_dp['bp']:.0f} psi\n"
-                            f"Cycle: Efficiency | Equipment: Column / Pump"
-                        )
-                    elif res_f is not None:
-                        excerpt = (
-                            f" Adjusting flow rate ($F$) re-optimizes linear velocity ($u$) along the Van Deemter curve, "
-                            f"balancing plate count against runtime.\n"
-                            f"Predicted Metrics -> $F$: {res_f['flow_rate']:.2f} mL/min | $R_s$: {res_f['rs']:.2f} | $N$: {res_f['plates']:.0f} | "
-                            f"Runtime: {res_f['tR']:.2f} min | Pressure: {res_f['bp']:.0f} psi\n"
-                            f"Cycle: Efficiency | Equipment: Pump"
-                        )
-                    else:
-                        excerpt = " However, single-parameter changes cannot simultaneously shorten analysis time and recover resolution. Tool has automatically escalated to candidate combinations."
 
-                    st.info(f"Prescribed Strategy: Decrease Particle Size ($d_p$), then adjust Flow Rate ($F$).{excerpt}")
-                    if 'However' in excerpt:
-                        Efficiency.handle_efficiency()
+                    # Retrieve explicit sequence step for single-parameter escalation
+                    cope_step = st.session_state.get('cope_step', 0)
+                    chosen_candidate = None
+
+                    if cope_step == 0:
+                        # Step 0: Try flow_rate_cope first
+                        cope_res = Efficiency.flow_rate_cope()
+
+                        if cope_res and cope_res.get('status') == 'exceeds_bp':
+                            st.warning(f"⚠️ **{cope_res['message']}** Escalating to multi-parameter combinations.")
+                            Efficiency.handle_efficiency()
+                        elif cope_res and cope_res.get('status') == 'valid':
+                            chosen_candidate = cope_res
+                            st.info(
+                                f"**Prescribed Strategy: Increase Flow Rate ($F \\uparrow$)**\n\n"
+                                f"Increasing flow rate to **{cope_res['flow_rate']:.2f} mL/min** brings runtime to **{cope_res['tR']:.2f} min** "
+                                f"(at least 5% under specification) while maintaining backpressure ({cope_res['bp']:.0f} psi) and resolution ({cope_res['rs']:.2f})."
+                            )
+                        else:
+                            # flow_rate_cope failed resolution check -> escalate to multi-parameter combinations
+                            st.warning("⚠️ Increasing flow rate alone cannot meet runtime without violating resolution spec. Escalating to candidate combinations.")
+                            Efficiency.handle_efficiency()
+
+                    elif cope_step >= 1:
+                        # Step 1: Flow rate was already attempted, try particle size (dp)
+                        dp_res = Efficiency.particle_size()
+
+                        if dp_res is not None:
+                            chosen_candidate = dp_res
+                            st.info(
+                                f"**Prescribed Strategy: Decrease Particle Size ($d_p \\downarrow$)**\n\n"
+                                f"Previous flow rate adjustment was insufficient. Decreasing particle size to recover efficiency."
+                            )
+                        else:
+                            # Step 2: Particle size fails/useless -> escalate to Selectivity
+                            st.warning("⚠️ Particle size adjustment cannot satisfy specifications. Escalating to Selectivity (α) Cycle.")
+                            handle_selectivity()
+
+                    # Set UI flags if a valid single candidate exists
+                    if chosen_candidate:
+                        st.session_state.single_param_candidates = [chosen_candidate]
+                        st.session_state.show_single_param_ui = True
+
+                    # ALWAYS provide manual multi-parameter escalation button
+                    st.markdown("---")
+                    st.session_state.view_admissible_case_c = True
 
 def generate_selectivity_plot():
     """Generates a simplified Plotly graph using stored slopes, intercepts, and R^2 values."""
@@ -2389,7 +2615,7 @@ def main():
                 
                 # Determine current run index
                 run_idx = len(st.session_state.all_csvs)
-                
+                print('I can print')
                 if len(parts) >= 14:
                     actual_solvent = parts[3].strip()
                     actual_pct_b = float(parts[6])
@@ -2556,15 +2782,55 @@ def main():
         st.session_state.show_efficiency_ui = False
     if "efficiency_candidates" not in st.session_state:
         st.session_state.efficiency_candidates = []
+    if 'view_admissible_case_c' not in st.session_state:
+        st.session_state.view_admissible_case_c = False
 
+    # Single-Parameter Optimization Choice UI (rendered strictly in main)
+    if st.session_state.get('show_single_param_ui', False) and st.session_state.get('single_param_candidates'):
+        single_cands = st.session_state.single_param_candidates
+
+        st.markdown("### ⚙️ **Single-Parameter Efficiency Options**")
+        st.write(f"Identified **{len(single_cands)} single-parameter optimization options**:")
+
+        option_labels = []
+        for i, c in enumerate(single_cands):
+            changes = "; ".join(c.get('changes', ['Parameter Adjustment']))
+            tR = c.get('tR', 0.0)
+            rs = c.get('rs', c.get('predicted_rs', 0.0))
+            bp = c.get('bp', 0.0)
+            label = f"Option {i+1}: {changes} | ⏱️ tR: {tR:.2f} min | 🎯 Rs: {rs:.2f} | ⚡ BP: {bp:.0f} psi"
+            option_labels.append(label)
+
+        with st.form(key="single_parameter_choice_form"):
+            selected_label = st.radio(
+                "Choose single-parameter optimization strategy:",
+                options=option_labels,
+                key="single_param_radio_select"
+            )
+            submitted = st.form_submit_button("Confirm Single-Parameter Strategy", type="primary")
+
+            if submitted:
+                selected_idx = option_labels.index(selected_label)
+                chosen_cand = single_cands[selected_idx]
+                Efficiency.commit_single_parameter_selection(chosen_cand)
+                st.session_state.show_efficiency_ui = False
+                st.rerun()
+    if st.session_state.view_admissible_case_c:
+        if st.button('View admissible conditions using multiple parameters, if there are any'):
+            st.session_state.view_admissible_case_c = False
+
+            #st.session_state.single_param_candidates = []
+            #st.session_state.show_single_param_ui = False
+
+            Efficiency.handle_efficiency()
     # Persistent UI Block: Executes directly in main()
     if st.session_state.show_efficiency_ui and st.session_state.efficiency_candidates:
         candidates = st.session_state.efficiency_candidates
 
         # Single Candidate Auto-Commit
-        if len(candidates) == 1:
-            Efficiency.commit_efficiency_selection(candidates[0])
-            st.rerun()
+        #if len(candidates) == 1:
+        #    Efficiency.commit_efficiency_selection(candidates[0])
+        #   st.rerun()
 
         # Multi-Candidate Selection UI
         st.markdown("### ⚙️ **Select Next Run Conditions**")
@@ -2595,6 +2861,8 @@ def main():
 
         if st.button("Confirm Selected Strategy", type="primary"):
             Efficiency.commit_efficiency_selection(active_cand)
+            st.session_state.single_param_candidates = []
+            st.session_state.show_single_param_ui = False
             st.rerun()
 
     # Persistent Decision Radio Block (outside st.button to maintain state)
