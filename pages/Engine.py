@@ -1368,55 +1368,63 @@ def evaluate_next_run_conditions(peakspec, runspec, res_spec, bpspec):
             # =========================================================================
             # CASE C: RUNTIME ABOVE SPEC (tR > Spec) & RESOLUTION DEFICIT
             # =========================================================================
-            else:
-                    st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ > Spec | Floor < $R_s$ < Spec")
+            elif tR_above:
+                # Subcase C1: Critical Resolution Deficit (Rs < Floor)
+                if rs_below_floor:
+                    st.caption(
+                        f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | "
+                        f"$t_R$ > Spec | $R_s$ below floor -> Triggering Selectivity."
+                    )
+                    st.warning(
+                        f"⚠️ **Resolution is below the hard efficiency floor ($R_s < {rs_floor:.2f}$) "
+                        f"and runtime exceeds specification ($t_R > t_{{R,\\text{{spec}}}}$).**\n\n"
+                        "Gaining critical resolution through efficiency alone requires $N \\propto R_s^2$, "
+                        "which will breach backpressure limits or further exacerbate analysis time. "
+                        "**Escalating directly to Selectivity (α) Cycle** to alter stationary/mobile phase chemistry."
+                    )
+                    handle_selectivity(prev_b=False)
 
-                    # Retrieve explicit sequence step for single-parameter escalation
-                    cope_step = st.session_state.get('cope_step', 0)
-                    chosen_candidate = None
+                # Subcase C2: Moderate Resolution Deficit (Floor <= Rs < Spec)
+                else:
+                    st.caption(
+                        f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | "
+                        f"$t_R$ > Spec | Floor <= $R_s$ < Spec"
+                    )
 
-                    if cope_step == 0:
-                        # Step 0: Try flow_rate_cope first
-                        cope_res = Efficiency.flow_rate_cope()
+                    # 1. Evaluate single-parameter candidate viability
+                    candidates = [
+                        Efficiency.flow_rate(),
+                        Efficiency.particle_size(),
+                        Efficiency.spp()
+                    ]
+                    valid = [c for c in candidates if c is not None]
 
-                        if cope_res and cope_res.get('status') == 'exceeds_bp':
-                            st.warning(f"⚠️ **{cope_res['message']}** Escalating to multi-parameter combinations.")
-                            Efficiency.handle_efficiency()
-                        elif cope_res and cope_res.get('status') == 'valid':
-                            chosen_candidate = cope_res
-                            st.info(
-                                f"**Prescribed Strategy: Increase Flow Rate ($F \\uparrow$)**\n\n"
-                                f"Increasing flow rate to **{cope_res['flow_rate']:.2f} mL/min** brings runtime to **{cope_res['tR']:.2f} min** "
-                                f"(at least 5% under specification) while maintaining backpressure ({cope_res['bp']:.0f} psi) and resolution ({cope_res['rs']:.2f})."
-                            )
-                        else:
-                            # flow_rate_cope failed resolution check -> escalate to multi-parameter combinations
-                            st.warning("⚠️ Increasing flow rate alone cannot meet runtime without violating resolution spec. Escalating to candidate combinations.")
-                            Efficiency.handle_efficiency()
+                    # 2. Render Single-Parameter UI if candidates pass constraints
+                    if valid:
+                        explanation = (
+                            " Over-runtime condition ($t_R > t_{{R,\\text{{spec}}}}$) paired with a moderate resolution deficit.\n\n"
+                            "**Physical Rationale for Available Single-Parameter Adjustments:**\n"
+                            "- **Increase Flow Rate ($F \\uparrow$):** Increases linear velocity to bring $t_R$ under specification ($t_R \\propto 1/F$) while keeping system backpressure within instrument limits.\n"
+                            "- **Decrease Particle Size ($d_p \\downarrow$):** Sharply boosts plate count ($N \\propto 1/d_p$) and reduces C-term mass transfer resistance.\n"
+                            "- **Switch to Core-Shell (SPP):** Increases efficiency ($N \\approx 1.5 \\times N_{{\\text{{FPP}}}}$) with lower backpressure penalty than small fully porous particles.\n\n"
+                            "*Select your preferred single-parameter strategy from the menu below.*"
+                        )
+                        st.info(f"**Prescribed Strategy: Single-Parameter Optimization**\n\n{explanation}")
 
-                    elif cope_step >= 1:
-                        # Step 1: Flow rate was already attempted, try particle size (dp)
-                        dp_res = Efficiency.particle_size()
-
-                        if dp_res is not None:
-                            chosen_candidate = dp_res
-                            st.info(
-                                f"**Prescribed Strategy: Decrease Particle Size ($d_p \\downarrow$)**\n\n"
-                                f"Previous flow rate adjustment was insufficient. Decreasing particle size to recover efficiency."
-                            )
-                        else:
-                            # Step 2: Particle size fails/useless -> escalate to Selectivity
-                            st.warning("⚠️ Particle size adjustment cannot satisfy specifications. Escalating to Selectivity (α) Cycle.")
-                            handle_selectivity()
-
-                    # Set UI flags if a valid single candidate exists
-                    if chosen_candidate:
-                        st.session_state.single_param_candidates = [chosen_candidate]
+                        st.session_state.single_param_candidates = valid
                         st.session_state.show_single_param_ui = True
 
-                    # ALWAYS provide manual multi-parameter escalation button
-                    st.markdown("---")
-                    st.session_state.view_admissible_case_c = True
+                    # 3. Escalate to Combinatorial Engine if single-parameter changes fail
+                    else:
+                        explanation = (
+                            " Single-parameter adjustments ($F \\uparrow$, $d_p \\downarrow$, SPP) cannot pull runtime under spec ($t_R \\le t_{{R,\\text{{spec}}}}$) "
+                            "without violating resolution or system backpressure limits. Escalating to multi-parameter combinations."
+                        )
+                        st.warning(f"⚠️ **Prescribed Strategy: Multi-Parameter Combinatorial Optimization**\n\n{explanation}")
+
+                        st.session_state.single_param_candidates = []
+                        st.session_state.show_single_param_ui = False
+                        Efficiency.handle_efficiency()
 
 def generate_selectivity_plot():
     """Generates a simplified Plotly graph using stored slopes, intercepts, and R^2 values."""
