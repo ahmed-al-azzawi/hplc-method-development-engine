@@ -1482,7 +1482,7 @@ def evaluate_next_run(df: pd.DataFrame, filename: str) -> None:
             b_last = c1_old + (t_grad_last * slope)
 
             # 4. Apply safety boundary floors (Max 35% starting %B, Min 70% ending %B)
-            c1_new = min(35.0, b_first)
+            c1_new = min(25.0, b_first)
             c2_new = max(70.0, b_last)
 
             # Round to clean 1 decimal place
@@ -2929,7 +2929,7 @@ def evaluate_next_run_conditions(peakspec, runspec, res_spec, bpspec):
                 if rs_below_floor:
                     # The requirements indeed say to Increase L even though Rs below floor. Definitely verify this.
                     st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ << Spec | $R_s$ below floor")
-                    res = Efficiency.column_length(care_about_resolution=False)
+                    res = Efficiency.column_length(care_about_resolution=True)
                     excerpt = ''
                     if res is not None:
                         excerpt = (
