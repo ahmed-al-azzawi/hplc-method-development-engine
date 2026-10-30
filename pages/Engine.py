@@ -14,6 +14,7 @@ from math import ceil
 from plotly import graph_objects as go
 import random
 from scipy.optimize import linear_sum_assignment
+from scipy.signal import find_peaks
 from types import SimpleNamespace as sns 
 import streamlit.components.v1 as components
 import json
@@ -29,8 +30,151 @@ st.session_state.pending_ligand_change = False
 st.session_state.tr_slope = 0
 st.session_state.tr_intercept = 0
 st.session_state.tr_tzero = 0
-if 'cope_step' not in st.session_state:
-   st.session_state.cope_step = 0
+if 'your_fault' not in st.session_state:
+   st.session_state.your_fault = False
+
+def clean_dataframe(df: pd.DataFrame, min_area_pct: float = 0.10) -> pd.DataFrame:
+    """Cleans raw Shimadzu DataFrame:
+
+    - Removes noise peak rows (Area < min_area_pct% of total area).
+    - Renumbers remaining real peaks sequentially (1..N).
+    - Updates '# of Peaks' header metadata cell.
+    - Shifts all lower sections ([Compound Results], raw traces, etc.) up.
+    """
+    df = df.copy()
+
+    # 1. Locate Peak Table header and '# of Peaks' row
+    peak_table_idx = None
+    peaks_count_row = None
+    header_row_idx = None
+
+    for idx, row in df.iterrows():
+        row_str = row.astype(str)
+        if row_str.str.contains(r"\[Peak Table", case=False, regex=True).any():
+            peak_table_idx = idx
+        if (
+            peak_table_idx is not None
+            and row_str.str.contains("# of Peaks", case=False).any()
+        ):
+            peaks_count_row = idx
+        if (
+            peak_table_idx is not None
+            and row_str.str.contains("Peak#", case=False).any()
+        ):
+            header_row_idx = idx
+            break
+
+    if header_row_idx is None:
+        return df  # Return unmodified if peak table is missing
+
+    # 2. Map column headers
+    headers = [str(val).strip() for val in df.iloc[header_row_idx].values]
+    area_col_idx = headers.index("Area") if "Area" in headers else 4
+
+    # 3. Collect Peak Table data row indices
+    data_row_indices = []
+    for idx in range(header_row_idx + 1, len(df)):
+        first_cell = str(df.iloc[idx, 0]).strip()
+        # Stop at blank rows or next metadata sections like '[Compound Results'
+        if not first_cell or first_cell.startswith("[") or not first_cell.isdigit():
+            break
+        data_row_indices.append(idx)
+
+    if not data_row_indices:
+        return df
+
+    # 4. Calculate relative Area % for each peak
+    areas = pd.to_numeric(
+        df.iloc[data_row_indices, area_col_idx], errors="coerce"
+    ).fillna(0.0)
+    total_area = areas.sum()
+
+    if total_area == 0:
+        return df
+
+    area_pcts = (areas / total_area) * 100.0
+
+    # 5. Separate real peaks from baseline noise artifacts
+    is_real = area_pcts >= min_area_pct
+    fake_indices = [
+        data_row_indices[i] for i, real in enumerate(is_real) if not real
+    ]
+    real_indices = [
+        data_row_indices[i] for i, real in enumerate(is_real) if real
+    ]
+
+    if not fake_indices:
+        return df  # No noise rows to purge
+
+    # 6. Renumber remaining real peaks sequentially (1, 2, 3... N)
+    for new_peak_num, row_idx in enumerate(real_indices, start=1):
+        df.iloc[row_idx, 0] = new_peak_num
+
+    # 7. Update '# of Peaks' metadata count in Column B
+    if peaks_count_row is not None:
+        df.iloc[peaks_count_row, 1] = len(real_indices)
+
+    # 8. Drop fake peak rows and reset DataFrame index (shifts everything up)
+    df = df.drop(index=fake_indices).reset_index(drop=True)
+
+    return df
+
+def integration_artefacts(df: pd.DataFrame) -> int:
+    """Fixes user deviation by processing raw chromatogram signal directly."""
+    st.session_state.your_fault = True
+
+    first_col = df.iloc[:, 0]
+    target_string = "Chromatogram"
+
+    matches = first_col.astype(str).str.contains(target_string, case=False, na=False)
+
+    if not matches.any():
+        raise ValueError(
+            f"'{target_string}' header was not found in the first column of the CSV."
+        )
+
+    row_of_match = matches.values.argmax()
+    start_row = row_of_match + 11
+
+    # Extract raw signal values as floats
+    absorbances = []
+    for val in df.iloc[start_row:, 1]:
+        val_str = str(val).strip()
+        if val_str == "" or val_str.lower() == "nan":
+            break
+        try:
+            absorbances.append(float(val_str))
+        except ValueError:
+            break
+
+    if not absorbances:
+        raise ValueError("No valid numeric absorbance values found after header row offset.")
+
+    signal = np.array(absorbances)
+
+    # 1. Estimate true baseline noise using point-to-point differences (median absolute deviation)
+    # This prevents tall peak heights from inflating the noise estimate
+    diffs = np.diff(signal)
+    noise_std = np.median(np.abs(diffs - np.median(diffs))) * 1.4826
+
+    # 2. Set dynamic thresholds relative to peak max and baseline noise
+    max_signal = np.max(signal)
+    baseline_level = np.median(signal)
+
+    # Prominence: Peak must stand out by at least 10x baseline noise OR 0.5% of max peak height
+    min_prominence = max(10 * noise_std, 0.005 * (max_signal - baseline_level))
+
+    # 3. Detect real peaks using prominence and minimum sampling distance
+    # distance=10 prevents SciPy from double-counting noisy peak tops
+    peak_indices, _ = find_peaks(
+        signal, 
+        prominence=min_prominence,
+        distance=10
+    )
+
+    real_peak_count = len(peak_indices)
+    print(f'Found {real_peak_count} peaks!')
+    return real_peak_count
 
 
 def render_next_run_conditions_preview():
@@ -269,7 +413,7 @@ class Efficiency:
         if required_plates is None:
             required_plates = Efficiency.predict_required_plates()
 
-        available_sizes = st.session_state.get('available_particle_sizes', [1.8, 2.7, 3.5, 5.0])
+        available_sizes = st.session_state.get('available_particle_sizes', [1.8, 2.7, 3.0, 3.5, 5.0])
         plate_counts = [current_N * (current_PS / new_PS) for new_PS in available_sizes]
         valid_candidates = [(PS, N) for PS, N in zip(available_sizes, plate_counts) if N >= required_plates]
 
@@ -510,7 +654,7 @@ class Efficiency:
         current_rs = float(Efficiency._get_safe_last('all_resolutions_final', 1.0))
         current_N = float(Efficiency._get_safe_last('plates', 10000.0))
 
-        bpspec = float(st.session_state.get('bpspec', 4000.0))
+        bpspec = float(st.session_state.get('bpspec', 4000.0)) * 0.9
         runspec = float(st.session_state.get('runspec', 15.0))
         res_spec = float(st.session_state.get('res_spec', 1.4))
 
@@ -633,10 +777,34 @@ class Efficiency:
                             if cand and cand['tier'] in candidate_buckets:
                                 candidate_buckets[cand['tier']].append(cand)
 
-            for tier_level in [2, 3, 4]:
-                if candidate_buckets[tier_level]:
-                    selected_candidates = candidate_buckets[tier_level]
-                    break
+        # 1. Flatten all candidate buckets (Tiers 2, 3, 4) into a single list
+        flattened_candidates = [
+            cand for bucket in candidate_buckets.values() for cand in bucket
+        ]
+
+        # 2. Define maximum acceptable uncertainty threshold (e.g., 15% relative variance bound)
+        MAX_UNCERTAINTY_THRESHOLD = 0.15 
+
+        def calculate_uncertainty(cand: dict) -> float:
+            """
+            Calculates compound model uncertainty (sigma_total) using the Law of Propagation of Variance.
+            Uncertainty grows as more parameters shift from baseline.
+            """
+            # Relative variance contributions per parameter shift
+            sigma_F   = 0.03 if cand.get('F_changed') else 0.0     # Flow rate prediction variance (3%)
+            sigma_dp  = 0.05 if cand.get('dp_changed') else 0.0    # Particle size / pressure variance (5%)
+            sigma_spp = 0.08 if cand.get('spp_changed') else 0.0   # Morphology shift variance (8%)
+            sigma_L   = 0.04 if cand.get('L_changed') else 0.0     # Column length / dwell variance (4%)
+
+            # Compound variance: sqrt(sum(sigma_i^2))
+            total_uncertainty = (sigma_F**2 + sigma_dp**2 + sigma_spp**2 + sigma_L**2) ** 0.5
+            return total_uncertainty
+
+        # 3. Filter out candidates where compound uncertainty exceeds the threshold
+        selected_candidates = [
+            cand for cand in flattened_candidates 
+            if calculate_uncertainty(cand) <= MAX_UNCERTAINTY_THRESHOLD
+        ]
 
         if selected_candidates:
             print(f'All Selected Candidates: {selected_candidates}')
@@ -683,7 +851,8 @@ class Efficiency:
                     candidates_not_in_possession.append(cand)
 
             # 3. Stack in-possession columns directly at the top of the pile
-            st.session_state.efficiency_candidates = candidates_in_possession + candidates_not_in_possession
+            eff_candidates = (candidates_in_possession + candidates_not_in_possession)[:30]
+            st.session_state.efficiency_candidates = eff_candidates
             st.session_state.show_efficiency_ui = True
             return None
 
@@ -1164,7 +1333,6 @@ def evaluate_next_run_conditions(peakspec, runspec, res_spec, bpspec):
                 on_change=on_override_segmented_control_change,
                 args=(ctrl_key,)
             )
-
     # --- 1. Backpressure Check ---
     if latest_bp > bpspec:
         st.caption(f"📊 **Run Metrics:** Backpressure ({latest_bp:.1f} psi) > Spec ({bpspec:.1f} psi) | Peaks: {latest_peaks}/{peakspec}")
@@ -1513,7 +1681,35 @@ def determine_selectivity_case(actual_solvent, actual_temp, initial_solvent):
         else:
             return 3  # Swapped solvent at amb -> handle_selectivity does +1 -> Case 4 (Swapped solvent at 40 °C)
 
+class UserDeviationError(Exception):
+    pass
+
 def safe_read(uploaded_file):
+    if uploaded_file.name.lower().endswith(('.xlsx', '.xls')):
+        try:
+            # Wrap raw bytes in io.BytesIO for openpyxl compatibility in WASM/stlite
+            excel_buffer = io.BytesIO(uploaded_file.getvalue())
+
+            # Read Excel file into a DataFrame without headers
+            df_excel = pd.read_excel(excel_buffer, header=None, engine="openpyxl")
+
+            # Guarantee a 16-column wide matrix (indices 0..15)
+            curr_cols = df_excel.shape[1]
+            if curr_cols < 16:
+                for col_idx in range(curr_cols, 16):
+                    df_excel[col_idx] = None
+
+            return df_excel.iloc[:, :16]
+
+        except Exception as e:
+            print(f"Excel conversion failed: {e}")
+            st.error(
+                "❌ **Unsupported File Format**: Excel conversion failed. "
+                "Please export your data as a native **CSV file** from LabSolutions."
+            )
+            raise UserDeviationError(
+                "The provided file type is not supported. Only CSVs are supported."
+            )
     # 1. Detect encoding
     raw_bytes = uploaded_file.getvalue()
     detected = chardet.detect(raw_bytes)
@@ -2265,6 +2461,14 @@ def equipment_interactive():
                 st.subheader(f"Monograph: {node_title}")
                 st.image(f"assets/{current_node}.png")
 
+def is_number(question: str) -> bool:
+    try:
+        questions = question.split('x')
+        for each in questions:
+            float(each)
+        return True
+    except ValueError:
+        return False
 
 def main():
     # --------------------------------------------------------------------------
@@ -2573,7 +2777,7 @@ def main():
     if 'submitted_specs' not in st.session_state:
         st.session_state['submitted_specs'] = False
 
-    if st.button('Submit specifications.'):
+    if st.button('Manual Submit Specifications (Auto submits on first file upload otherwise)'):
         st.session_state.submitted_specs = True
         st.session_state.peakspec = peakspec
         st.session_state.runspec = runspec
@@ -2583,11 +2787,14 @@ def main():
     if 'processed_file_ids' not in st.session_state:
         st.session_state.processed_file_ids = set()
 
+    #if st.button('Click if first run is coreshell', type='primary'):
+    #    st.session_state.all_coreshells.append(True)
+
     # Run Conditions Reminder
     render_next_run_conditions_preview()
   
     # 2. Uploading & Single-Execution Processing
-    added_file = st.file_uploader('Upload a CSV file of your run.', type='csv', key="main_run_uploader")
+    added_file = st.file_uploader('Upload a CSV file of your run.', type=['csv', 'xlsx'], key="main_run_uploader")
 
     if added_file is not None:
         # Unique file fingerprint combining filename and byte size
@@ -2606,6 +2813,17 @@ def main():
 
                 # Peak Count
                 peak_cnt = peak_count(dataframe_added)
+                if peak_cnt > peakspec:
+                    st.error(
+                        'CSV shows more peaks than are expected! '
+                        'The system will automatically use manual integration to find the peaks. '
+                        'Look at your chromatogram to check if there is contamination, or if you failed to remove integration artefacts. '
+                        'Integration artefacts will automatically be removed, then the decision will be made. '
+                        f'Peak count from CSV: {peak_cnt}. '
+                    )
+                    peak_cnt = integration_artefacts(dataframe_added)
+                    dataframe_added = clean_dataframe(dataframe_added, min_area_pct=1.0)
+
                 
                 # Run Time & Retention Times
                 retention_analysis = retention_time(dataframe_added, peak_cnt)
@@ -2632,15 +2850,39 @@ def main():
                     actual_temp = str(parts[13]).strip()
                     
                     # Parse dimensions (e.g., 150x4.6x5)
-                    dim_parts = parts[12].lower().split('x')
-                    actual_length = float(dim_parts[0]) if len(dim_parts) > 0 else 150.0
-                    actual_id = float(dim_parts[1]) if len(dim_parts) > 1 else 4.6
-                    actual_particle_size = float(dim_parts[2]) if len(dim_parts) > 2 else 5.0
+                    try:
+                        dim_parts = parts[12].lower().split('x')
+                        actual_length = float(dim_parts[0]) if len(dim_parts) > 0 else 150.0
+                        actual_id = float(dim_parts[1]) if len(dim_parts) > 1 else 4.6
+                        actual_particle_size = float(dim_parts[2]) if len(dim_parts) > 2 else 5.0
+                    except ValueError as e:
+                        try:
+                            print(e)
+                            st.warning(
+                                'The naming of this file is incorrect and constitutes a deviation. '
+                                'Automatically attempting to parse this file name to interpret your mistakes...'
+                            )
+                            numeric_parts = [num.strip() for num in parts if is_number(num)]
+                            dim_parts = [part for part in numeric_parts if 'x' in part][0].split('x')
+                            actual_length = float(dim_parts[0]) if len(dim_parts) > 0 else 150.0
+                            actual_id = float(dim_parts[1]) if len(dim_parts) > 1 else 4.6
+                            actual_particle_size = float(dim_parts[2]) if len(dim_parts) > 2 else 5.0
+                        except Exception as e:
+                            print(f'The improperly named file exception is: {e}')
+                            st.error(
+                                'You must rename your file.'
+                            )
+                            raise UserDeviationError('File name is inappropriate and does not follow the required format.')
+
+                        
 
                     # Standard defaults for physical column properties
                     actual_bead_type = "FPP"
                     actual_pore_size = 140.0
-                    actual_coreshell = False
+                    if 'Rap' in parts or 'Raptor' in parts:
+                        actual_coreshell = True
+                    else:
+                        actual_coreshell = False
                     actual_carbon_load = 11.0
                     
                     # ----------------------------------------------------------
