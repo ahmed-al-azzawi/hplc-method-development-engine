@@ -1046,8 +1046,8 @@ def evaluate_next_run(df: pd.DataFrame, filename: str) -> None:
             b_first = c1_old + (t_grad_first * slope)
             b_last = c1_old + (t_grad_last * slope)
 
-            # 4. Apply safety boundary floors (Max 35% starting %B, Min 70% ending %B)
-            c1_new = min(35.0, b_first)
+            # 4. Apply safety boundary floors (Max 25% starting %B, Min 70% ending %B)
+            c1_new = min(25.0, b_first)
             c2_new = max(70.0, b_last)
 
             # Round to clean 1 decimal place
@@ -1111,8 +1111,39 @@ def evaluate_next_run(df: pd.DataFrame, filename: str) -> None:
 
 def main() -> None:
     initialise_variables()
-    with st.expander('View Instructions and Video'):
-        pass
+    with st.expander("🎥 View Instructions & Video Guide"):
+        # Video Placeholder (Replace URL when recorded)
+        st.video("https://www.youtube.com/embed/placeholder")
+        st.caption("📺 *Watch the video walkthrough above for a complete demonstration of the Gradient Engine workflow.*")
+        
+        st.markdown("---")
+        
+        st.markdown("""
+        ### 📋 Gradient Engine Workflow Instructions
+
+        Follow these steps sequentially to run and optimize your gradient separations:
+
+        1. **Set Instrument & Column Specs:** 
+        Configure your system parameters (column dimensions, particle size, flow rate, dwell volume, and initial solvent conditions). Click **Submit Specs** to lock in your baseline.
+
+        2. **Upload Your Scouting File:** 
+        Upload your raw chromatogram CSV data for the initial scouting run (e.g., `GR37-01-1`).
+
+        3. **Confirm Isocratic Holds ($t_D$ & $t_0$):** 
+        The engine automatically determines your dwell delay time ($t_D$) and column void time ($t_0$) from backpressure physics. Review the calculated values in the confirmation banner and adjust if necessary.
+
+        4. **Execute Optimization Runs:** 
+        Process the run. The system evaluates peak counts, critical resolution, and Gradient Steepness ($GS$).
+
+        5. **Review Results & Next Method Program:** 
+        Expand the **Run Summary & Recommended Gradient Program** section to inspect:
+        * Chromatogram peak resolution & dynamic backpressure profile traces.
+        * Calculated Gradient Steepness ($GS$) diagnostic metrics.
+        * **The automated Gradient Program for your next sequential run** (recommended $t_G$, initial $\%B$, final $\%B$, and flow rate $F$).
+
+        6. **Sequential Execution:** 
+        Apply the recommended method parameters to your HPLC system, run the sequence, and upload the resulting CSV files sequentially (`GR37-01-2`, `GR37-01-3`, etc.) to continue the optimization chain.
+        """)
     with st.container():
         st.header('Method Specifications')
         st.caption('Edit then submit these specifications.')
