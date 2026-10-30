@@ -2273,16 +2273,16 @@ def main():
     st.set_page_config(layout='wide')
 
     
-    st.title("Ahmed's HPLC Method Development Engine")
+    st.title("Isocratic HPLC Method Development Engine")
 
     # ==============================================================================
     # USER INSTRUCTIONS (COLLAPSIBLE EXPANDER)
     # ==============================================================================
     with st.expander("📖 View Method Development Instructions & Workflow Guide", expanded=False):
+        st.text('Watch the video tutorial for how to use the isocratic engine.')
+        st.text('https://www.youtube.com/watch?v=i4qgaplsa_k')
         st.markdown(
             """
-            Watch the video tutorial for a step-by-step walkthrough of how to use this app.
-            https://youtu.be/BZxVgvxXyQs
             ### 1️⃣ Set System Specifications
             * Enter the specifications for your run, including backpressure, runtime, target number of peaks, and resolution requirements.
             * Click the "Submit specifications" button to save your settings before uploading any runs.
