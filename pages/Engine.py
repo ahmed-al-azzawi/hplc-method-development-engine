@@ -3,7 +3,7 @@
 # ==============================================================================
 
 import sys
-from streamlit.web import cli as stcli
+#from streamlit.web import cli as stcli
 import streamlit as st
 import pandas as pd
 import chardet
@@ -1271,7 +1271,7 @@ def evaluate_next_run_conditions(peakspec, runspec, res_spec, bpspec):
                 if rs_below_floor:
                     # The requirements indeed say to Increase L even though Rs below floor. Definitely verify this.
                     st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ << Spec | $R_s$ below floor")
-                    res = Efficiency.column_length(care_about_resolution=False)
+                    res = Efficiency.column_length(care_about_resolution=True)
                     excerpt = ''
                     if res is not None:
                         excerpt = (
@@ -3020,5 +3020,8 @@ def main():
 if __name__ == "__main__":
     if not st.runtime.exists():
         sys.argv = ["streamlit", "run", __file__]
-        sys.exit(stcli.main())
+        #sys.exit(stcli.main())
     main()
+else:
+    pass
+    #main()
