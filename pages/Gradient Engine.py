@@ -1156,7 +1156,7 @@ def main() -> None:
     initialise_variables()
     with st.expander("🎥 View Instructions & Video Guide"):
         # Video Placeholder (Replace URL when recorded)
-        st.video("https://youtu.be/w2XEgybEw40")
+        st.text("https://youtu.be/w2XEgybEw40")
         st.caption("📺 *Watch the video walkthrough above for a complete demonstration of the Gradient Engine workflow.*")
         
         st.markdown("---")
