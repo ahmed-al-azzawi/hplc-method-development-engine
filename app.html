@@ -470,6 +470,49 @@ G1 ✕	< 7 (after G1 ↑ and ↓)	0	Change selectivity: temperature, solvent or 
 ''')
 # Equation: GS = ΔΦ × Vm ÷ (tG × F)
 
+def run_summary(df: pd.DataFrame) -> sns:
+    """Extracts key HPLC run metrics (Peaks, Resolution, Retention Time, and Pressure)
+
+    and displays them cleanly in a single caption bar.
+    """
+    # 1. Backpressure extraction
+    bp_obj = find_backpressure(df)
+    bp = float(getattr(bp_obj, "bp", 0.0))
+
+    # 2. Resolution extraction
+    res_raw = find_resolution(df)
+    resolution = float(
+        res_raw
+        if isinstance(res_raw, (int, float))
+        else getattr(res_raw, "rs", getattr(res_raw, "resolution", 0.0))
+    )
+
+    # 3. Retention time extraction
+    tr_raw = retention_time(df)
+    tR = float(
+        tr_raw
+        if isinstance(tr_raw, (int, float))
+        else getattr(tr_raw, "tR", getattr(tr_raw, "time", 0.0))
+    )
+
+    # 4. Peak count extraction
+    peaks_raw = peak_count(df)
+    peaks = int(
+        peaks_raw
+        if isinstance(peaks_raw, (int, float))
+        else getattr(peaks_raw, "peaks", getattr(peaks_raw, "count", 0))
+    )
+
+    # 5. Display concise run metrics banner
+    st.caption(
+        f"📊 **Run Metrics:** Peaks: **{peaks}** | "
+        f"Critical $R_s$: **{resolution:.2f}** | "
+        f"Max $t_R$: **{tR:.2f} min** | "
+        f"Max Pressure: **{bp:.0f} psi**"
+    )
+
+    return sns(bp=bp, resolution=resolution, tR=tR, peaks=peaks)
+
 def initialise_variables() -> None:
     # 1. Keys that default to None
     static_keys = [
@@ -1481,7 +1524,7 @@ def evaluate_next_run(df: pd.DataFrame, filename: str) -> None:
             b_first = c1_old + (t_grad_first * slope)
             b_last = c1_old + (t_grad_last * slope)
 
-            # 4. Apply safety boundary floors (Max 35% starting %B, Min 70% ending %B)
+            # 4. Apply safety boundary floors (Max 25% starting %B, Min 70% ending %B)
             c1_new = min(25.0, b_first)
             c2_new = max(70.0, b_last)
 
@@ -1548,7 +1591,7 @@ def main() -> None:
     initialise_variables()
     with st.expander("🎥 View Instructions & Video Guide"):
         # Video Placeholder (Replace URL when recorded)
-        st.video("https://www.youtube.com/embed/placeholder")
+        st.text("https://youtu.be/w2XEgybEw40")
         st.caption("📺 *Watch the video walkthrough above for a complete demonstration of the Gradient Engine workflow.*")
         
         st.markdown("---")
@@ -1650,10 +1693,13 @@ def main() -> None:
                     st.session_state.grad_conditions.append(run_conditions)
                 else:
                     st.session_state.grad_conditions.append(expected)
+                try:
+                    run_summary(df)
+                except:
+                    pass
                 evaluate_next_run(df, added_file.name)
                 
             st.session_state.grad_files.append(file_id)
-            pass
             display_gradient_run_structure_expander(df, st.session_state.grad_conditions[-1], st.session_state.grad_expected_run[-1])
 
 main()`,"pages/Engine.py":`# ==============================================================================
@@ -3026,55 +3072,63 @@ def evaluate_next_run_conditions(peakspec, runspec, res_spec, bpspec):
             # =========================================================================
             # CASE C: RUNTIME ABOVE SPEC (tR > Spec) & RESOLUTION DEFICIT
             # =========================================================================
-            else:
-                    st.caption(f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | $t_R$ > Spec | Floor < $R_s$ < Spec")
+            elif tR_above:
+                # Subcase C1: Critical Resolution Deficit (Rs < Floor)
+                if rs_below_floor:
+                    st.caption(
+                        f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | "
+                        f"$t_R$ > Spec | $R_s$ below floor -> Triggering Selectivity."
+                    )
+                    st.warning(
+                        f"⚠️ **Resolution is below the hard efficiency floor ($R_s < {rs_floor:.2f}$) "
+                        f"and runtime exceeds specification ($t_R > t_{{R,\\\\text{{spec}}}}$).**\\n\\n"
+                        "Gaining critical resolution through efficiency alone requires $N \\\\propto R_s^2$, "
+                        "which will breach backpressure limits or further exacerbate analysis time. "
+                        "**Escalating directly to Selectivity (α) Cycle** to alter stationary/mobile phase chemistry."
+                    )
+                    handle_selectivity(prev_b=False)
 
-                    # Retrieve explicit sequence step for single-parameter escalation
-                    cope_step = st.session_state.get('cope_step', 0)
-                    chosen_candidate = None
+                # Subcase C2: Moderate Resolution Deficit (Floor <= Rs < Spec)
+                else:
+                    st.caption(
+                        f"📊 **Run Metrics:** Peaks ({latest_peaks}) == Spec ({peakspec}) | "
+                        f"$t_R$ > Spec | Floor <= $R_s$ < Spec"
+                    )
 
-                    if cope_step == 0:
-                        # Step 0: Try flow_rate_cope first
-                        cope_res = Efficiency.flow_rate_cope()
+                    # 1. Evaluate single-parameter candidate viability
+                    candidates = [
+                        Efficiency.flow_rate(),
+                        Efficiency.particle_size(),
+                        Efficiency.spp()
+                    ]
+                    valid = [c for c in candidates if c is not None]
 
-                        if cope_res and cope_res.get('status') == 'exceeds_bp':
-                            st.warning(f"⚠️ **{cope_res['message']}** Escalating to multi-parameter combinations.")
-                            Efficiency.handle_efficiency()
-                        elif cope_res and cope_res.get('status') == 'valid':
-                            chosen_candidate = cope_res
-                            st.info(
-                                f"**Prescribed Strategy: Increase Flow Rate ($F \\\\uparrow$)**\\n\\n"
-                                f"Increasing flow rate to **{cope_res['flow_rate']:.2f} mL/min** brings runtime to **{cope_res['tR']:.2f} min** "
-                                f"(at least 5% under specification) while maintaining backpressure ({cope_res['bp']:.0f} psi) and resolution ({cope_res['rs']:.2f})."
-                            )
-                        else:
-                            # flow_rate_cope failed resolution check -> escalate to multi-parameter combinations
-                            st.warning("⚠️ Increasing flow rate alone cannot meet runtime without violating resolution spec. Escalating to candidate combinations.")
-                            Efficiency.handle_efficiency()
+                    # 2. Render Single-Parameter UI if candidates pass constraints
+                    if valid:
+                        explanation = (
+                            " Over-runtime condition ($t_R > t_{{R,\\\\text{{spec}}}}$) paired with a moderate resolution deficit.\\n\\n"
+                            "**Physical Rationale for Available Single-Parameter Adjustments:**\\n"
+                            "- **Increase Flow Rate ($F \\\\uparrow$):** Increases linear velocity to bring $t_R$ under specification ($t_R \\\\propto 1/F$) while keeping system backpressure within instrument limits.\\n"
+                            "- **Decrease Particle Size ($d_p \\\\downarrow$):** Sharply boosts plate count ($N \\\\propto 1/d_p$) and reduces C-term mass transfer resistance.\\n"
+                            "- **Switch to Core-Shell (SPP):** Increases efficiency ($N \\\\approx 1.5 \\\\times N_{{\\\\text{{FPP}}}}$) with lower backpressure penalty than small fully porous particles.\\n\\n"
+                            "*Select your preferred single-parameter strategy from the menu below.*"
+                        )
+                        st.info(f"**Prescribed Strategy: Single-Parameter Optimization**\\n\\n{explanation}")
 
-                    elif cope_step >= 1:
-                        # Step 1: Flow rate was already attempted, try particle size (dp)
-                        dp_res = Efficiency.particle_size()
-
-                        if dp_res is not None:
-                            chosen_candidate = dp_res
-                            st.info(
-                                f"**Prescribed Strategy: Decrease Particle Size ($d_p \\\\downarrow$)**\\n\\n"
-                                f"Previous flow rate adjustment was insufficient. Decreasing particle size to recover efficiency."
-                            )
-                        else:
-                            # Step 2: Particle size fails/useless -> escalate to Selectivity
-                            st.warning("⚠️ Particle size adjustment cannot satisfy specifications. Escalating to Selectivity (α) Cycle.")
-                            handle_selectivity()
-
-                    # Set UI flags if a valid single candidate exists
-                    if chosen_candidate:
-                        st.session_state.single_param_candidates = [chosen_candidate]
+                        st.session_state.single_param_candidates = valid
                         st.session_state.show_single_param_ui = True
 
-                    # ALWAYS provide manual multi-parameter escalation button
-                    st.markdown("---")
-                    st.session_state.view_admissible_case_c = True
+                    # 3. Escalate to Combinatorial Engine if single-parameter changes fail
+                    else:
+                        explanation = (
+                            " Single-parameter adjustments ($F \\\\uparrow$, $d_p \\\\downarrow$, SPP) cannot pull runtime under spec ($t_R \\\\le t_{{R,\\\\text{{spec}}}}$) "
+                            "without violating resolution or system backpressure limits. Escalating to multi-parameter combinations."
+                        )
+                        st.warning(f"⚠️ **Prescribed Strategy: Multi-Parameter Combinatorial Optimization**\\n\\n{explanation}")
+
+                        st.session_state.single_param_candidates = []
+                        st.session_state.show_single_param_ui = False
+                        Efficiency.handle_efficiency()
 
 def generate_selectivity_plot():
     """Generates a simplified Plotly graph using stored slopes, intercepts, and R^2 values."""
@@ -3923,16 +3977,16 @@ def main():
     st.set_page_config(layout='wide')
 
     
-    st.title("Ahmed's HPLC Method Development Engine")
+    st.title("Isocratic HPLC Method Development Engine")
 
     # ==============================================================================
     # USER INSTRUCTIONS (COLLAPSIBLE EXPANDER)
     # ==============================================================================
     with st.expander("📖 View Method Development Instructions & Workflow Guide", expanded=False):
+        st.text('Watch the video tutorial for how to use the isocratic engine.')
+        st.text('https://www.youtube.com/watch?v=i4qgaplsa_k')
         st.markdown(
             """
-            Watch the video tutorial for a step-by-step walkthrough of how to use this app.
-            https://youtu.be/BZxVgvxXyQs
             ### 1️⃣ Set System Specifications
             * Enter the specifications for your run, including backpressure, runtime, target number of peaks, and resolution requirements.
             * Click the "Submit specifications" button to save your settings before uploading any runs.
