@@ -35,6 +35,49 @@ G1 ✕	< 7 (after G1 ↑ and ↓)	0	Change selectivity: temperature, solvent or 
 ''')
 # Equation: GS = ΔΦ × Vm ÷ (tG × F)
 
+def run_summary(df: pd.DataFrame) -> sns:
+    """Extracts key HPLC run metrics (Peaks, Resolution, Retention Time, and Pressure)
+
+    and displays them cleanly in a single caption bar.
+    """
+    # 1. Backpressure extraction
+    bp_obj = find_backpressure(df)
+    bp = float(getattr(bp_obj, "bp", 0.0))
+
+    # 2. Resolution extraction
+    res_raw = find_resolution(df)
+    resolution = float(
+        res_raw
+        if isinstance(res_raw, (int, float))
+        else getattr(res_raw, "rs", getattr(res_raw, "resolution", 0.0))
+    )
+
+    # 3. Retention time extraction
+    tr_raw = retention_time(df)
+    tR = float(
+        tr_raw
+        if isinstance(tr_raw, (int, float))
+        else getattr(tr_raw, "tR", getattr(tr_raw, "time", 0.0))
+    )
+
+    # 4. Peak count extraction
+    peaks_raw = peak_count(df)
+    peaks = int(
+        peaks_raw
+        if isinstance(peaks_raw, (int, float))
+        else getattr(peaks_raw, "peaks", getattr(peaks_raw, "count", 0))
+    )
+
+    # 5. Display concise run metrics banner
+    st.caption(
+        f"📊 **Run Metrics:** Peaks: **{peaks}** | "
+        f"Critical $R_s$: **{resolution:.2f}** | "
+        f"Max $t_R$: **{tR:.2f} min** | "
+        f"Max Pressure: **{bp:.0f} psi**"
+    )
+
+    return sns(bp=bp, resolution=resolution, tR=tR, peaks=peaks)
+
 def initialise_variables() -> None:
     # 1. Keys that default to None
     static_keys = [
@@ -1113,7 +1156,7 @@ def main() -> None:
     initialise_variables()
     with st.expander("🎥 View Instructions & Video Guide"):
         # Video Placeholder (Replace URL when recorded)
-        st.video("https://www.youtube.com/embed/placeholder")
+        st.video("https://youtu.be/w2XEgybEw40")
         st.caption("📺 *Watch the video walkthrough above for a complete demonstration of the Gradient Engine workflow.*")
         
         st.markdown("---")
@@ -1215,10 +1258,13 @@ def main() -> None:
                     st.session_state.grad_conditions.append(run_conditions)
                 else:
                     st.session_state.grad_conditions.append(expected)
+                try:
+                    run_summary(df)
+                except:
+                    pass
                 evaluate_next_run(df, added_file.name)
                 
             st.session_state.grad_files.append(file_id)
-            pass
             display_gradient_run_structure_expander(df, st.session_state.grad_conditions[-1], st.session_state.grad_expected_run[-1])
 
 main()
