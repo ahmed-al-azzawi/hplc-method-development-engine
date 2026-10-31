@@ -13,6 +13,8 @@ import numpy as np
 from scipy.stats import linregress
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from uuid import uuid4
+import re 
 
 
 # Custom SVG encoded as a data URI
@@ -92,7 +94,8 @@ def initialise_variables() -> None:
         'grad_solvent',
         'grad_ligand',
         'grad_temperature',
-        'delta_tG'
+        'delta_tG',
+        'last_reading'
     ]
     for key in static_keys:
         if key not in st.session_state:
@@ -584,6 +587,13 @@ def parse_file_name(filename: str) -> sns:
     # GR37-34-4-MeOH-3-GRA-25-95-10-1.5-20u-CP-0.1-C18P-150x4.6x5-amb
     # GR41-23-2-MeOH-3-GRA-5-100-20-1.5-20u-CP-0.1-PFPP-100x4.6x5-amb-254
 
+    if 'SIMULATED' in filename:
+        rubbish_free_filename = re.sub(r'(RG\d+-)|SIMULATED-|-P-', '', filename)
+        placeholdered_file_name = re.sub(r'GR\d+-', 'GR01-1-1-', rubbish_free_filename)
+        filename = placeholdered_file_name
+        st.error('Your file name is not appropriate but was automatically fixed.')
+        
+
     clean_name = filename.rsplit('.', 1)[0] if '.' in filename else filename
     split_apart = clean_name.split('-')
 
@@ -638,25 +648,34 @@ def parse_file_name(filename: str) -> sns:
         )
 
         form_key = f"manual_param_form_{hash(filename)}"
-        with st.form(key=form_key):
-            col1, col2 = st.columns(2)
-            with col1:
-                c1 = st.number_input("Initial %B (c1)", value=5.0, step=1.0)
-                c2 = st.number_input("Final %B (c2)", value=95.0, step=1.0)
-                tG = st.number_input("Gradient Time tG (min)", value=20.0, step=0.5)
-                F = st.number_input("Flow Rate F (mL/min)", value=1.0, step=0.1)
-                solvent = st.text_input("Solvent (e.g., MeOH, ACN)", value="MeOH")
+        try:
+            deviation_form = st.form(key=form_key)
+        except:
+            deviation_form = None
+            return st.session_state.last_reading
+        if deviation_form is not None:
+            with deviation_form:
+                col1, col2 = st.columns(2)
+                with col1:
+                    c1 = st.number_input("Initial %B (c1)", value=5.0, step=1.0)
+                    c2 = st.number_input("Final %B (c2)", value=95.0, step=1.0)
+                    tG = st.number_input("Gradient Time tG (min)", value=20.0, step=0.5)
+                    F = st.number_input("Flow Rate F (mL/min)", value=1.0, step=0.1)
+                    solvent = st.text_input("Solvent (e.g., MeOH, ACN)", value="MeOH")
 
-            with col2:
-                ligand = st.text_input("Column Stationary Phase / Ligand", value="C18")
-                length = st.number_input("Column Length L (mm)", value=150.0, step=10.0)
-                internal_diameter = st.number_input("Column Internal Diameter id (mm)", value=4.6, step=0.1)
-                T = st.number_input("Temperature T (°C)", value=25.0, step=1.0)
+                with col2:
+                    ligand = st.text_input("Column Stationary Phase / Ligand", value="C18")
+                    length = st.number_input("Column Length L (mm)", value=150.0, step=10.0)
+                    internal_diameter = st.number_input("Column Internal Diameter id (mm)", value=4.6, step=0.1)
+                    T = st.number_input("Temperature T (°C)", value=25.0, step=1.0)
+                    hold1 = st.number_input('First isocratic hold (min)', value=2.0)
+                    hold2 = st.number_input('Final isocratic hold (min)', value=3.0)
 
-            submitted = st.form_submit_button("Confirm Method Conditions")
+                submitted = st.form_submit_button("Confirm Method Conditions")
 
         if submitted:
-            return sns(
+            deviation_form = None
+            form_submission = sns(
                 c1=c1,
                 c2=c2,
                 tG=tG,
@@ -666,9 +685,11 @@ def parse_file_name(filename: str) -> sns:
                 T=T,
                 id=internal_diameter,
                 L=length,
-                initial_hold=0.0,
-                final_hold=0.0,
+                initial_hold=hold1,
+                final_hold=hold2,
             )
+            st.session_state.last_reading = form_submission
+            return form_submission
         else:
             st.stop()
 
