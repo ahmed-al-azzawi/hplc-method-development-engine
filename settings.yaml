@@ -9,6 +9,7 @@ APP_REQUIREMENTS:
   - chardet
   - scipy
   - plotly
+  - openpyxl
 
 APP_FILES:
   - app.py
