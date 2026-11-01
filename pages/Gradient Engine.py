@@ -1016,6 +1016,9 @@ def evaluate_next_run(df: pd.DataFrame, filename: str) -> None:
     last_sns = st.session_state.grad_conditions[-1]
     information_string = ''
 
+    if peaks > peakspec:
+        st.error('Your sample is contaminated; there are too many peaks. Clean your sample and try again!')
+
     if peaks < peakspec:
         if st.session_state.g1_progression > 2:
             # Selectivity change, since we already did increase and decrease.
